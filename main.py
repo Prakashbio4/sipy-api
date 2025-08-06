@@ -170,3 +170,11 @@ def generate_portfolio(user_input: PortfolioInput):
         "glide_path": glide_path.to_dict(orient="records"),
         "portfolio": combined.to_dict(orient="records")
     }
+
+import os
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))  # Railway passes PORT env var
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
