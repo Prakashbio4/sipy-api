@@ -6,11 +6,15 @@ import numpy as np
 app = FastAPI()
 
 # === Load data once at app startup ===
-active_eq = pd.read_csv("data/active_equity_portfolio.csv")
-passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
-hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
-tmf = pd.read_csv("data/tmf_selected.csv")
-duration_debt = pd.read_csv("data/debt_duration_selected.csv")
+try:
+    active_eq = pd.read_csv("data/active_equity_portfolio.csv")
+    passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
+    hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
+    tmf = pd.read_csv("data/tmf_selected.csv")
+    duration_debt = pd.read_csv("data/debt_duration_selected.csv")
+    print("✅ All CSVs loaded successfully.")
+except Exception as e:
+    print("❌ Failed to load CSVs:", e)
 
 # === Input Schema ===
 class PortfolioInput(BaseModel):
