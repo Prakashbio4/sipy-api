@@ -2,19 +2,26 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
+import os
 
 app = FastAPI()
 
 # === Load data once at app startup ===
-try:
-    active_eq = pd.read_csv("data/active_equity_portfolio.csv")
-    passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
-    hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
-    tmf = pd.read_csv("data/tmf_selected.csv")
-    duration_debt = pd.read_csv("data/debt_duration_selected.csv")
-    print("✅ All CSVs loaded successfully.")
-except Exception as e:
-    print("❌ Failed to load CSVs:", e)
+def _load_csvs():
+    try:
+        # You said the latest CSVs are in data/
+        active_eq = pd.read_csv("data/active_equity_portfolio.csv")
+        passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
+        hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
+        tmf = pd.read_csv("data/tmf_selected.csv")
+        duration_debt = pd.read_csv("data/debt_duration_selected.csv")
+        print("✅ All CSVs loaded successfully.")
+        return active_eq, passive_eq, hybrid_eq, tmf, duration_debt
+    except Exception as e:
+        print("❌ Failed to load CSVs:", e)
+        raise
+
+active_eq, passive_eq, hybrid_eq, tmf, duration_debt = _load_csvs()
 
 # === Input Schema ===
 class PortfolioInput(BaseModel):
@@ -23,18 +30,22 @@ class PortfolioInput(BaseModel):
     years_to_goal: int
     risk_profile: str  # 'conservative', 'moderate', 'aggressive'
 
-# --- Utility Functions (from orchestration engine) ---
-
-def calculate_funding_ratio(monthly_investment, target_corpus,years):
-    expected_return = 0.13  # Fixed expected return
-    r = (1 + expected_return) ** (1/12) - 1
+# ----------------- Core Utility Functions -----------------
+def calculate_funding_ratio(monthly_investment, target_corpus, years):
+    expected_return = 0.13  # fixed expected return (annual, 13%)
+    r = (1 + expected_return) ** (1/12) - 1  # monthly return
     n = years * 12
     fv = monthly_investment * (((1 + r) ** n - 1) / r)
     return fv, fv / target_corpus
 
 def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
+    """
+    Same logic as before, BUT we floor any non-zero bucket to >=10%
+    so later per-fund min-10% is always satisfiable after trimming.
+    """
     funding_ratio = float(funding_ratio)
     glide_path = []
+
     short_goal_equity_cap = 30 if time_to_goal <= 3 else 100
 
     if funding_ratio > 2.0:
@@ -62,9 +73,19 @@ def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
             equity = base_equity
         else:
             equity = base_equity - equity_step * (year - derisk_start)
+
         equity = int(round(max(min(equity, short_goal_equity_cap), 0) / 5) * 5)
+
+        # >>> bucket floors so we never have a non-zero bucket < 10%
+        if equity > 0 and equity < 10:
+            equity = 10
+
         debt = 100 - equity
-        glide_path.append({'Year': year, 'Equity Allocation (%)': equity, 'Debt Allocation (%)': debt})
+        if debt > 0 and debt < 10:
+            debt = 10
+            equity = 100 - debt
+
+        glide_path.append({'Year': year, 'Equity Allocation (%)': int(equity), 'Debt Allocation (%)': int(debt)})
 
     return pd.DataFrame(glide_path)
 
@@ -102,31 +123,77 @@ def choose_strategy(time_to_goal, risk_profile, funding_ratio):
         else:
             return "Active" if risk_profile == 'aggressive' else "Hybrid"
 
+# ---------- Min-10% helpers: trim + enforce ----------
+def trim_funds_to_min(df, total_pct, min_pct=10, sort_col=None):
+    """
+    Reduce number of funds so that len(df) * min_pct <= total_pct.
+    Keeps the best 'sort_col' funds if provided; otherwise current order.
+    """
+    max_funds = max(1, int(total_pct // min_pct))
+    if len(df) > max_funds:
+        if sort_col and sort_col in df.columns:
+            df = df.sort_values(sort_col, ascending=False).head(max_funds)
+        else:
+            df = df.head(max_funds)
+    return df.copy()
+
+def enforce_min_allocation(df, total_pct, min_pct=10, step=5):
+    """
+    Enforce:
+      - rounding to 'step' (default 5%)
+      - minimum of 'min_pct' per row
+      - re-normalize to total_pct
+      - final rounding + mismatch fix
+    """
+    df = df.copy()
+    df['Weight (%)'] = df['Weight (%)'].apply(lambda x: round(x / step) * step)
+    df['Weight (%)'] = df['Weight (%)'].apply(lambda x: max(min_pct, x))
+    s = df['Weight (%)'].sum()
+    if s == 0:
+        raise ValueError("Zero weights after min-enforcement.")
+    df['Weight (%)'] = df['Weight (%)'] / s * total_pct
+    df['Weight (%)'] = df['Weight (%)'].apply(lambda x: round(x / step) * step)
+    diff = total_pct - df['Weight (%)'].sum()
+    if diff != 0:
+        idx = df['Weight (%)'].idxmax()
+        df.at[idx, 'Weight (%)'] += diff
+    return df
+
+def standardize_fund_col(df):
+    if 'Fund' in df.columns:
+        return df
+    cand = [c for c in df.columns if 'fund' in c.lower() or 'scheme' in c.lower() or 'name' in c.lower()]
+    if cand:
+        return df.rename(columns={cand[0]: 'Fund'})
+    # fallback
+    df = df.copy()
+    df['Fund'] = df.index.astype(str)
+    return df
+
 def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     duration_debt_df = duration_debt_df.copy()
-    if time_to_goal > 3:
-        allowed_categories = ['Liquid']
-    else:
-        allowed_categories = ['Liquid', 'Ultra Short']
-    debt_filtered = duration_debt_df[duration_debt_df['Sub-category'].str.strip().isin(allowed_categories)].copy()
+
+    # If longer horizon, stick to Liquid; for <=3 yrs, allow Liquid + Ultra Short
+    allowed = ['Liquid'] if time_to_goal > 3 else ['Liquid', 'Ultra Short']
+    debt_filtered = duration_debt_df[duration_debt_df['Sub-category'].str.strip().isin(allowed)].copy()
     if debt_filtered.empty:
         raise ValueError("⚠️ No suitable debt funds found for the selected duration.")
-    debt_filtered['Fund'] = debt_filtered['Scheme Name']
+
+    debt_filtered = standardize_fund_col(debt_filtered)
     debt_filtered['Category'] = 'Debt'
+
+    # Trim to satisfy min-10 rule given the bucket
+    debt_filtered = trim_funds_to_min(debt_filtered, debt_pct, min_pct=10, sort_col='Weight' if 'Weight' in debt_filtered.columns else None)
+
+    # Equal split to start within the bucket
     debt_filtered['Weight (%)'] = debt_pct / len(debt_filtered)
-    debt_filtered['Weight (%)'] = debt_filtered['Weight (%)'].apply(lambda x: max(10, round(x / 5) * 5))
-    weight_sum = debt_filtered['Weight (%)'].sum()
-    debt_filtered['Weight (%)'] = debt_filtered['Weight (%)'] / weight_sum * debt_pct
-    debt_filtered['Weight (%)'] = debt_filtered['Weight (%)'].apply(lambda x: round(x / 5) * 5)
-    diff = debt_pct - debt_filtered['Weight (%)'].sum()
-    if abs(diff) >= 5:
-        idx = debt_filtered['Weight (%)'].idxmax()
-        debt_filtered.loc[idx, 'Weight (%)'] += diff
+
     return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
-# === API Endpoint ===
+# ================= API Endpoint =================
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
+    # 1) Funding + Strategy + Glide
     fv, funding_ratio = calculate_funding_ratio(
         user_input.monthly_investment,
         user_input.target_corpus,
@@ -134,9 +201,17 @@ def generate_portfolio(user_input: PortfolioInput):
     )
     strategy = choose_strategy(user_input.years_to_goal, user_input.risk_profile, funding_ratio)
     glide_path = generate_step_down_glide_path(user_input.years_to_goal, funding_ratio, user_input.risk_profile)
-    glide_equity_pct = int(glide_path.iloc[0]['Equity Allocation (%)'])
 
-    # Equity Selection
+    # Use Year-1 buckets for construction; ensure non-zero bucket floors (defensive)
+    glide_equity_pct = int(glide_path.iloc[0]['Equity Allocation (%)'])
+    if glide_equity_pct > 0 and glide_equity_pct < 10:
+        glide_equity_pct = 10
+    glide_debt_pct = 100 - glide_equity_pct
+    if glide_debt_pct > 0 and glide_debt_pct < 10:
+        glide_debt_pct = 10
+        glide_equity_pct = 100 - glide_debt_pct
+
+    # 2) Equity selection (by chosen strategy)
     if strategy == "Active":
         eq_df = active_eq.copy()
         eq_df['Sub-category'] = 'Active'
@@ -145,40 +220,53 @@ def generate_portfolio(user_input: PortfolioInput):
         eq_df['Sub-category'] = 'Passive'
     elif strategy == "Hybrid":
         eq_df = hybrid_eq.copy()
-        eq_df.rename(columns={'Type': 'Sub-category'}, inplace=True)
+        eq_df = eq_df.rename(columns={'Type': 'Sub-category'})
+    else:
+        raise ValueError("Invalid strategy")
+
+    eq_df = standardize_fund_col(eq_df)
     eq_df['Category'] = 'Equity'
-    eq_df['Weight'] = 1 / len(eq_df)
-    eq_df['Weight (%)'] = eq_df['Weight'] * glide_equity_pct / 100
-    eq_df.rename(columns={col: 'Fund' for col in eq_df.columns if 'fund' in col.lower()}, inplace=True)
-    eq_df['Weight (%)'] = eq_df['Weight (%)'].apply(lambda x: max(10, round(x / 5) * 5))
-    eq_df['Weight (%)'] = eq_df['Weight (%)'] / eq_df['Weight (%)'].sum() * glide_equity_pct
-    eq_df['Weight (%)'] = eq_df['Weight (%)'].apply(lambda x: round(x / 5) * 5)
 
-    # Debt Selection
-    debt_pct = 100 - glide_equity_pct
-    selected_debt = get_debt_allocation(duration_debt, user_input.years_to_goal, debt_pct)
+    # If a 'Weight' column exists, keep it as a relative signal; otherwise equal weights
+    if 'Weight' not in eq_df.columns:
+        eq_df['Weight'] = 1.0
 
-    # Combine
+    # Trim equity funds so each can be >=10% within the equity bucket
+    eq_df = trim_funds_to_min(eq_df, glide_equity_pct, min_pct=10, sort_col='Weight')
+
+    # Start with proportional weights inside the equity bucket
+    eq_df['Weight'] = eq_df['Weight'] / eq_df['Weight'].sum()
+    eq_df['Weight (%)'] = eq_df['Weight'] * glide_equity_pct
+
+    # Enforce per-fund min 10% within equity bucket
+    eq_df = enforce_min_allocation(eq_df[['Fund', 'Category', 'Sub-category', 'Weight (%)']], glide_equity_pct, min_pct=10, step=5)
+
+    # 3) Debt selection
+    selected_debt = get_debt_allocation(duration_debt, user_input.years_to_goal, glide_debt_pct)
+    selected_debt = enforce_min_allocation(selected_debt, glide_debt_pct, min_pct=10, step=5)
+
+    # 4) Combine & final enforcement for whole portfolio
     combined = pd.concat([
         eq_df[['Fund', 'Category', 'Sub-category', 'Weight (%)']],
         selected_debt[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
     ], ignore_index=True)
-    combined['Weight (%)'] = combined['Weight (%)'].apply(lambda x: round(x / 5) * 5)
-    diff = 100 - combined['Weight (%)'].sum()
-    if diff != 0:
-        idx = combined['Weight (%)'].idxmax()
-        combined.at[idx, 'Weight (%)'] += diff
+
+    final_portfolio = enforce_min_allocation(combined, 100, min_pct=10, step=5)
+
+    # Safety checks
+    if (final_portfolio['Weight (%)'] < 10).any():
+        raise ValueError("Found a fund below 10% after enforcement.")
+    if final_portfolio['Weight (%)'].sum() != 100:
+        raise ValueError("Final portfolio does not sum to 100%.")
 
     return {
         "strategy": strategy,
+        "funding_ratio": round(float(funding_ratio), 4),
         "glide_path": glide_path.to_dict(orient="records"),
-        "portfolio": combined.to_dict(orient="records")
+        "portfolio": final_portfolio.to_dict(orient="records")
     }
-
-import os
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))  # Railway passes PORT env var
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
-
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
