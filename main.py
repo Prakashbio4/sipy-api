@@ -1,10 +1,26 @@
-from fastapi import FastAPI
+# ======================= main.py =======================
+# (CHANGES: added HTTPException, Request, CORS, and the /explain/glide endpoint)
+
+from fastapi import FastAPI, HTTPException, Request   # === NEW: added HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware    # === NEW: CORS (optional, safe to keep)
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import os
 
+# === NEW: import the explainer (same folder as main.py)
+from glide_explainer import explain_glide_story
+
 app = FastAPI()
+
+# === NEW (optional): CORS if your frontend is on a different domain
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # tighten to your domains if you prefer
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # === Load data once at app startup ===
 def _load_csvs():
@@ -190,7 +206,7 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
 
     return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
-# ================= API Endpoint =================
+# ================= API Endpoint: Generate portfolio =================
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
     # 1) Funding + Strategy + Glide
@@ -266,7 +282,37 @@ def generate_portfolio(user_input: PortfolioInput):
         "portfolio": final_portfolio.to_dict(orient="records")
     }
 
+# ================= API Endpoint: Explain Glide (NEW) =================
+@app.post("/explain/glide")
+async def explain_glide(request: Request):
+    """
+    Expects body:
+    {
+      "common": { "user": {...}, "goal": {"years_to_goal": <int>} },
+      "glide_path": {
+        "bands": [ { "Year": 1, "Equity Allocation (%)": 85, "Debt Allocation (%)": 15 }, ... ]
+        // OR: "glide_path": [ ... ]  (alternate key also tolerated)
+      }
+    }
+    """
+    try:
+        payload = await request.json()
+        common = payload.get("common", {}) or {}
+        glide_path = payload.get("glide_path", {}) or {}
+
+        # Tolerate either "bands" or "glide_path" inside glide_path
+        if "bands" not in glide_path and "glide_path" in glide_path:
+            glide_path = {"bands": glide_path.get("glide_path", [])}
+
+        out = explain_glide_story(common, glide_path)
+        return out
+    except Exception as e:
+        # Surface a helpful error to the caller
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ================= Entrypoint =================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+# ===================== end main.py ======================
