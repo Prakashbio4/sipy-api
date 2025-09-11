@@ -3,6 +3,7 @@
 
 from fastapi import FastAPI, HTTPException, Request   # === NEW: added HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware    # === NEW: CORS (optional, safe to keep)
+from typing import Any, Dict, Optional
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
@@ -10,6 +11,7 @@ import os
 
 # === NEW: import the explainer (same folder as main.py)
 from glide_explainer import explain_glide_story
+from strategy_explainer import explain_strategy_story
 
 app = FastAPI()
 
@@ -106,6 +108,11 @@ def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
     return pd.DataFrame(glide_path)
 
 def choose_strategy(time_to_goal, risk_profile, funding_ratio):
+
+ # normalize risk_profile to lowercase for consistent checks
+
+    risk_profile = (risk_profile or "").lower()
+
     if time_to_goal <= 3:
         return "Passive"
     if funding_ratio >= 1.3:
@@ -309,6 +316,30 @@ async def explain_glide(request: Request):
     except Exception as e:
         # Surface a helpful error to the caller
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ================= API Endpoint: Explain Strategy (NEW) =================
+class StrategyExplainRequest(BaseModel):
+    strategy: str                  # "Active" | "Passive" | "Hybrid"
+    years_to_goal: int
+    risk_preference: str           # "conservative" | "moderate" | "aggressive"
+    funding_ratio: float = None
+
+@app.post("/explain/strategy")
+def explain_strategy(req: StrategyExplainRequest):
+    """
+    Returns a layman-friendly 3-line explanation of why this strategy was chosen.
+    """
+    try:
+        return explain_strategy_story(
+            strategy=req.strategy,
+            years_to_goal=req.years_to_goal,
+            risk_preference=req.risk_preference,
+            funding_ratio=req.funding_ratio,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 # ================= Entrypoint =================
 if __name__ == "__main__":
