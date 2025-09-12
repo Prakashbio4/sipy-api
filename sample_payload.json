@@ -1,0 +1,29 @@
+{
+  "common": {
+    "user": {
+      "risk_preference": "Moderate"
+    },
+    "goal": {
+      "years_to_goal": 25
+    }
+  },
+  "glide_path": {
+    "bands": [
+      {
+        "Year": 1,
+        "Equity Allocation (%)": 85,
+        "Debt Allocation (%)": 15
+      },
+      {
+        "Year": 13,
+        "Equity Allocation (%)": 80,
+        "Debt Allocation (%)": 20
+      },
+      {
+        "Year": 25,
+        "Equity Allocation (%)": 10,
+        "Debt Allocation (%)": 90
+      }
+    ]
+  }
+}
