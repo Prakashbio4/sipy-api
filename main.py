@@ -12,6 +12,8 @@ import os
 # === NEW: import the explainer (same folder as main.py)
 from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
+# === NEW: import the explainer (same folder as main.py)
+from portfolio_explainer import explain_portfolio_story
 
 app = FastAPI()
 
