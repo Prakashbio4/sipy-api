@@ -5,6 +5,28 @@ import pandas as pd
 import numpy as np
 import os
 
+__API_BUILD__ = "glide-fix-002"  # bump this whenever you deploy
+
+def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ratio):
+    """Works with both legacy(list) and new(dict) glide_explainer signatures."""
+    rows = glide_path_df.to_dict(orient="records")
+    try:
+        # Legacy: function expects just the list
+        return explain_glide_story(rows)
+    except TypeError as e:
+        # Try new-style payload with full context
+        try:
+            return explain_glide_story({
+                "years_to_goal": years_to_goal,
+                "risk_profile": risk_profile,
+                "funding_ratio": float(funding_ratio),
+                "glide_path": rows,
+            })
+        except TypeError:
+            # Re-raise original for a clean error if both fail
+            raise e
+
+
 # === Explainers (stories layer) ===
 from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
@@ -255,7 +277,9 @@ def generate_portfolio(user_input: PortfolioInput):
         glide_rows = glide_path.to_dict(orient="records")
 
         # Your glide_explainer currently expects only the list (legacy signature)
-        glide_block = explain_glide_story(glide_rows)
+        glide_block = _call_glide_explainer(
+    glide_path, user_input.years_to_goal, user_input.risk_profile, funding_ratio
+)
 
         # Strategy explainer: give richer context
         equity_summary = {
@@ -314,7 +338,7 @@ def generate_portfolio(user_input: PortfolioInput):
 # Health check
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "build": __API_BUILD__}
 
 if __name__ == "__main__":
     import uvicorn
