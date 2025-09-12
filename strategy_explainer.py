@@ -1,48 +1,38 @@
-# strategy_explainer.py
+# ===================== strategy_explainer.py =====================
 from typing import Dict, Any, Optional, Union
 
-def explain_strategy_story(ctx_or_strategy: Union[Dict[str, Any], str],
-                           years_to_goal: Optional[int] = None,
-                           risk_preference: Optional[str] = None,
-                           funding_ratio: Optional[float] = None) -> Dict[str, Any]:
-    """
-    Compatible with:
-      - explain_strategy_story({"strategy":..., "years_to_goal":..., "risk_profile":...})
-      - explain_strategy_story(strategy, years_to_goal, risk_preference, funding_ratio)
-    (We ignore funding_ratio in the user-facing text.)
-    """
-    if isinstance(ctx_or_strategy, dict):
-        s  = (ctx_or_strategy.get("strategy") or "").strip().title()
-        yt = int(ctx_or_strategy.get("years_to_goal") or 0)
-        rp = (ctx_or_strategy.get("risk_profile") or ctx_or_strategy.get("risk_preference") or "").strip().title() or "Moderate"
-    else:
-        s  = (ctx_or_strategy or "").strip().title()
-        yt = int(years_to_goal or 0)
-        rp = (risk_preference or "").strip().title() or "Moderate"
 
-    # Plain-English reasons (no jargon, no funding-ratio mention)
+def explain_strategy_story(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Returns a layman, ≤3-sentence story about how the money will be managed.
+    """
+    s = (ctx.get("strategy") or "").strip().title()
+    yt = int(ctx.get("years_to_goal") or 0)
+    rp = (ctx.get("risk_profile") or "Moderate").strip().capitalize() or "Moderate"
+    
+    story = ""
     if s == "Passive":
-        if yt <= 6:
-            story = (
-                f"**Passive** keeps things steady and low-cost for a {yt}-year goal. "
-                f"Your **{rp}** preference shows up in the higher equity level early on, "
-                f"while broad index funds keep the ride smoother as you get closer to the goal."
-            )
-        else:
-            story = (
-                f"**Passive** focuses on broad market growth at low cost. "
-                f"It avoids manager guesswork and lets the glide path handle how much equity you carry over time."
-            )
+        story = (
+            f"Your plan uses a **Passive** strategy. For a goal with a **{yt}-year horizon**, "
+            "this approach helps keep costs low and avoids the risk of poor fund manager decisions. "
+            f"This passive approach works well with your **{rp}** risk preference because it relies "
+            "on the market's long-term growth, while the glide path handles the necessary risk "
+            "reduction as your goal approaches."
+        )
     elif s == "Hybrid":
         story = (
-            f"**Hybrid** mixes index funds with select active ideas. "
-            f"It aims for a little extra growth without making the journey complicated."
+            f"Your plan uses a **Hybrid** strategy. This approach combines the stability and low cost of passive index funds "
+            "with a small, targeted portion of active funds. This blend aims to capture the market's growth while "
+            "still allowing for a little extra upside potential."
         )
-    else:  # Active
+    elif s == "Active":
         story = (
-            f"**Active** leans on carefully chosen managers and factors to try for extra growth, "
-            f"while the glide path still reduces risk as you near the goal."
+            f"Your plan uses an **Active** strategy. For a goal with a **{yt}-year horizon** that is currently "
+            f"under-funded, this strategy strategically allocates more to high-potential funds to aggressively pursue growth. "
+            f"This matches your **{rp}** risk preference and gives your plan the best shot to meet your goal."
         )
+    else:
+        story = "The investment strategy for your plan could not be determined."
 
     return {
         "block_id": "block_2_strategy",
@@ -51,5 +41,5 @@ def explain_strategy_story(ctx_or_strategy: Union[Dict[str, Any], str],
             "strategy": s,
             "years_to_goal": yt,
             "risk_preference": rp,
-        },
+        }
     }
