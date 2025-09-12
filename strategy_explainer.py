@@ -1,84 +1,56 @@
 # strategy_explainer.py
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
-def explain_strategy_story(strategy: str,
-                           years_to_goal: int,
-                           risk_preference: str,
-                           funding_ratio: Optional[float]) -> Dict[str, Any]:
-    """
-    Returns a layman, ≤3-sentence story about how the money will be managed.
-    """
-    s = (strategy or "").strip().lower()
-    rp = (risk_preference or "").strip().capitalize() or "Moderate"
-    horizon_label = "short" if years_to_goal <= 5 else ("mid-term" if years_to_goal <= 10 else "long-term")
+def explain_strategy_story(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    strategy      = (ctx.get("strategy") or "").strip().title()
+    years         = int(ctx.get("years_to_goal") or 0)
+    risk_raw      = (ctx.get("risk_profile") or "").strip().title()
+    funding_ratio = float(ctx.get("funding_ratio") or 0.0)
 
-    if funding_ratio is None:
-        funding_status = "unknown"
-    elif funding_ratio < 0.7:
-        funding_status = "catch_up"
-    elif funding_ratio >= 1.3:
-        funding_status = "ahead"
+    if funding_ratio >= 1.3:
+        fr_label, fr_phrase = "ahead_of_pace", "ahead of pace"
+    elif funding_ratio >= 0.7:
+        fr_label, fr_phrase = "on_track", "on track"
     else:
-        funding_status = "on_track"
+        fr_label, fr_phrase = "behind_pace", "behind pace"
 
-    active_base = (
-        "You’re in an active plan because right now your investments are falling short of the goal, "
-        "but you still have time to build it up. "
-        "This means strategically allocating more to high-potential opportunities to aggressively pursue growth, "
-        "even if it comes with extra risk and cost. "
-        f"That matches your {rp} profile and gives your plan the best shot to catch up."
-    )
-    passive_base = (
-        "You’re in a passive plan because your goal is on track and there’s no need to take unnecessary risks. "
-        "Most of your money is parked in index funds, riding the whole market at low cost so steady compounding does the work. "
-        f"This fits your {rp} profile and keeps the journey simple and predictable."
-    )
-    hybrid_base = (
-        "You’re in a hybrid plan because you need both reliability and a little extra growth and risk. "
-        "A big part of your money compounds steadily in index funds, while another part is guided into active picks for added growth. "
-        f"This balance reflects your {rp} and adapts as you move closer to the goal."
-    )
-
-    if s == "active":
-        story = active_base
-        if funding_status != "catch_up":
+    if strategy == "Passive":
+        # Explain why Passive even for Aggressive users: glide path handles aggression, Passive controls sequence/cost risk
+        if years <= 6:
             story = (
-                "You’re in an active plan because you want to pursue faster growth and you’ve got time to work with. "
-                "This means strategically allocating more to high-potential opportunities to aggressively pursue growth, "
-                "even if it comes with extra risk and cost. "
-                f"That matches your {rp} profile and gives your plan the best shot to reach your goal."
+                f"**Passive** is chosen to control sequence risk with a short horizon ({years} years) "
+                f"and keep costs low. Your **{risk_raw}** preference is reflected in the equity level "
+                f"of the glide path early on, while broad index exposure reduces single-fund surprises "
+                f"as withdrawals approach. With funding ratio **{funding_ratio:.2f}** ({fr_phrase}), "
+                f"this mix maximizes the chance of meeting the goal on time."
             )
-    elif s == "passive":
-        if funding_status == "on_track":
-            story = passive_base
         else:
             story = (
-                "You’re in a passive plan to keep risk measured and costs low. "
-                "Most of your money is parked in index funds, riding the whole market so steady compounding does the work without taking unnecessary risks. "
-                f"This fits your {rp} profile and keeps the journey simple and predictable."
+                f"**Passive** fits because you’re **{fr_phrase}** (funding ratio {funding_ratio:.2f}) "
+                f"and broad market capture at low cost beats manager risk for your plan. "
+                f"The **{risk_raw}** preference is honored via equity levels in the glide path."
             )
-        if years_to_goal <= 3:
-            story = (
-                "With your goal close, a passive plan keeps things steady and low-cost. "
-                "Most of your money is in index funds, riding the whole market so compounding does the work without taking unnecessary risks. "
-                f"This fits your {rp} profile and keeps the path predictable."
-            )
-    else:  # hybrid (default)
-        story = hybrid_base
-        if funding_status == "catch_up":
-            story = story[:-1] + "—adding a little extra push where it helps most."
-        elif funding_status == "ahead":
-            story = story[:-1] + "—preserving efficiency while keeping options open."
+    elif strategy == "Hybrid":
+        story = (
+            f"**Hybrid** blends low-cost index exposure with selective active bets. "
+            f"Given a {years}-year horizon and funding ratio {funding_ratio:.2f} ({fr_phrase}), "
+            f"it seeks added alpha where durable while keeping overall risk and cost in check."
+        )
+    else:  # Active
+        story = (
+            f"**Active** is selected because alpha potential matters more in your case "
+            f"(horizon {years} years, funding ratio {funding_ratio:.2f} — {fr_phrase}). "
+            f"The design targets persistent factors/managers to push outcomes toward the goal."
+        )
 
     return {
         "block_id": "block_2_strategy",
         "story": story,
         "data_points": {
             "strategy": strategy,
-            "years_to_goal": int(years_to_goal),
-            "risk_preference": rp,
-            "funding_ratio": None if funding_ratio is None else float(funding_ratio),
-            "funding_status": funding_status,
-            "horizon_label": horizon_label
-        }
+            "years_to_goal": years,
+            "risk_preference": risk_raw,
+            "funding_ratio": funding_ratio,
+            "funding_status": fr_label,
+        },
     }
