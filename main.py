@@ -363,6 +363,140 @@ def explain_portfolio(req: PortfolioExplainRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# ================= API Endpoint: One-call Orchestrator (NEW) =================
+@app.post("/plan/full")
+def generate_full_plan(user_input: PortfolioInput):
+    """
+    One call that returns:
+    - Glide path + Glide explanation
+    - Strategy choice + Strategy explanation
+    - Portfolio (fund list) + Portfolio explanation
+    Grouped and ordered for the UI.
+    """
+    # ---------- 1) Funding + Strategy + Glide ----------
+    fv, funding_ratio = calculate_funding_ratio(
+        user_input.monthly_investment,
+        user_input.target_corpus,
+        user_input.years_to_goal
+    )
+
+    # choose strategy
+    strategy = choose_strategy(user_input.years_to_goal, user_input.risk_profile, funding_ratio)
+
+    # build glide path (DataFrame -> list[dict])
+    glide_df = generate_step_down_glide_path(user_input.years_to_goal, funding_ratio, user_input.risk_profile)
+    glide_records = glide_df.to_dict(orient="records")
+
+    # ---------- 2) Portfolio construction ----------
+    # Use Year-1 buckets for construction; ensure non-zero bucket floors (defensive)
+    glide_equity_pct = int(glide_df.iloc[0]['Equity Allocation (%)'])
+    if glide_equity_pct > 0 and glide_equity_pct < 10:
+        glide_equity_pct = 10
+    glide_debt_pct = 100 - glide_equity_pct
+    if glide_debt_pct > 0 and glide_debt_pct < 10:
+        glide_debt_pct = 10
+        glide_equity_pct = 100 - glide_debt_pct
+
+    # Equity universe by strategy
+    if strategy == "Active":
+        eq_df = active_eq.copy()
+        eq_df['Sub-category'] = 'Active'
+    elif strategy == "Passive":
+        eq_df = passive_eq.copy()
+        eq_df['Sub-category'] = 'Passive'
+    elif strategy == "Hybrid":
+        eq_df = hybrid_eq.copy()
+        eq_df = eq_df.rename(columns={'Type': 'Sub-category'})
+    else:
+        raise HTTPException(status_code=400, detail="Invalid strategy")
+
+    eq_df = standardize_fund_col(eq_df)
+    eq_df['Category'] = 'Equity'
+    if 'Weight' not in eq_df.columns:
+        eq_df['Weight'] = 1.0
+
+    # Trim to satisfy min-10 inside equity bucket
+    eq_df = trim_funds_to_min(eq_df, glide_equity_pct, min_pct=10, sort_col='Weight')
+    eq_df['Weight'] = eq_df['Weight'] / eq_df['Weight'].sum()
+    eq_df['Weight (%)'] = eq_df['Weight'] * glide_equity_pct
+    eq_df = enforce_min_allocation(eq_df[['Fund', 'Category', 'Sub-category', 'Weight (%)']], glide_equity_pct, min_pct=10, step=5)
+
+    # Debt selection
+    selected_debt = get_debt_allocation(duration_debt, user_input.years_to_goal, glide_debt_pct)
+    selected_debt = enforce_min_allocation(selected_debt, glide_debt_pct, min_pct=10, step=5)
+
+    # Combine and final enforcement to 100%
+    combined = pd.concat([
+        eq_df[['Fund', 'Category', 'Sub-category', 'Weight (%)']],
+        selected_debt[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
+    ], ignore_index=True)
+    final_portfolio = enforce_min_allocation(combined, 100, min_pct=10, step=5)
+
+    if (final_portfolio['Weight (%)'] < 10).any():
+        raise HTTPException(status_code=400, detail="Found a fund below 10% after enforcement.")
+    if final_portfolio['Weight (%)'].sum() != 100:
+        raise HTTPException(status_code=400, detail="Final portfolio does not sum to 100%.")
+
+    # ---------- 3) EXPLANATIONS ----------
+    # Glide explainer expects {common, glide_path:{bands:[...]}}
+    glide_block = explain_glide_story(
+        {"user": {"risk_preference": user_input.risk_profile},
+         "goal": {"years_to_goal": user_input.years_to_goal}},
+        {"bands": glide_records}
+    )
+
+    # Strategy explainer
+    strategy_block = explain_strategy_story(
+        strategy=strategy,
+        years_to_goal=user_input.years_to_goal,
+        risk_preference=user_input.risk_profile,
+        funding_ratio=funding_ratio
+    )
+
+    # Portfolio explainer expects Weight (or Weight (%)); we already have "Weight (%)"
+    # Convert to "Weight" for cleaner schema
+    portfolio_for_story = final_portfolio.rename(columns={"Weight (%)": "Weight"})
+    portfolio_block = explain_portfolio_story(portfolio_for_story)
+
+    # ---------- 4) Assemble ordered sections ----------
+    response = {
+        "meta": {
+            "funding_ratio": round(float(funding_ratio), 4),
+            "future_value": round(float(fv), 2),
+            "years_to_goal": int(user_input.years_to_goal),
+            "risk_profile": user_input.risk_profile,
+            "strategy": strategy
+        },
+        "sections": [
+            {
+                "id": "glide",
+                "output": {"glide_path": glide_records},
+                "explanation": {
+                    "story": glide_block["story"],
+                    "data_points": glide_block["data_points"]
+                }
+            },
+            {
+                "id": "strategy",
+                "output": {"strategy": strategy},
+                "explanation": {
+                    "story": strategy_block["story"],
+                    "data_points": strategy_block["data_points"]
+                }
+            },
+            {
+                "id": "portfolio",
+                "output": {"portfolio": final_portfolio.to_dict(orient="records")},
+                "explanation": {
+                    "story": portfolio_block["story"],
+                    "data_points": portfolio_block["data_points"]
+                }
+            }
+        ]
+    }
+    return response
+
+
 
 # ================= Entrypoint =================
 if __name__ == "__main__":
