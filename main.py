@@ -270,15 +270,15 @@ def generate_portfolio(user_input: PortfolioInput):
 
         # ---------- EXPLAINER BLOCKS: Call with CORRECT signatures ----------
 
-        # Glide explainer call (requires two dicts)
+        # Glide explainer call (requires a single dictionary)
         glide_path_rows = glide_path.to_dict(orient="records")
-        common_context = {
-            "user": {"risk_preference": risk},
-            "goal": {"years_to_goal": user_input.years_to_goal},
-            "funding_ratio": float(funding_ratio)
+        glide_context = {
+            "years_to_goal": user_input.years_to_goal,
+            "risk_profile": user_input.risk_profile,
+            "funding_ratio": float(funding_ratio),
+            "glide_path": glide_path_rows
         }
-        glide_path_data = {"bands": glide_path_rows}
-        glide_block = explain_glide_story(common_context, glide_path_data)
+        glide_block = explain_glide_story(glide_context)
 
 
         # Strategy explainer call (requires four separate arguments)
