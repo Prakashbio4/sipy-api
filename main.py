@@ -5,27 +5,7 @@ import pandas as pd
 import numpy as np
 import os
 
-__API_BUILD__ = "glide-fix-002"  # bump this whenever you deploy
-
-def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ratio):
-    """Works with both legacy(list) and new(dict) glide_explainer signatures."""
-    rows = glide_path_df.to_dict(orient="records")
-    try:
-        # Legacy: function expects just the list
-        return explain_glide_story(rows)
-    except TypeError as e:
-        # Try new-style payload with full context
-        try:
-            return explain_glide_story({
-                "years_to_goal": years_to_goal,
-                "risk_profile": risk_profile,
-                "funding_ratio": float(funding_ratio),
-                "glide_path": rows,
-            })
-        except TypeError:
-            # Re-raise original for a clean error if both fail
-            raise e
-
+__API_BUILD__ = "glide-fix-003"  # bump this to verify deploys via /health
 
 # === Explainers (stories layer) ===
 from glide_explainer import explain_glide_story
@@ -41,7 +21,7 @@ def _load_csvs():
         active_eq = pd.read_csv("data/active_equity_portfolio.csv")
         passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
         hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
-        tmf = pd.read_csv("data/tmf_selected.csv")
+        tmf = pd.read_csv("data/tmf_selected.csv")  # loaded; wire-in later if needed
         duration_debt = pd.read_csv("data/debt_duration_selected.csv")
         print("✅ All CSVs loaded successfully.")
         return active_eq, passive_eq, hybrid_eq, tmf, duration_debt
@@ -85,9 +65,10 @@ def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
         base_equity = 90
         derisk_start = int(time_to_goal * 0.6)
 
-    if risk_profile == 'conservative':
+    rp = (risk_profile or "").strip().lower()
+    if rp == 'conservative':
         base_equity -= 10
-    elif risk_profile == 'aggressive':
+    elif rp == 'aggressive':
         base_equity += 5
 
     base_equity = min(base_equity, short_goal_equity_cap)
@@ -130,29 +111,31 @@ def choose_strategy(time_to_goal, risk_profile, funding_ratio):
     else:
         funding_status = 'balanced'
 
+    rp = (risk_profile or "").strip().lower()
+
     if time_to_goal <= 5:
         if funding_status == 'overfunded':
             return "Passive"
-        elif risk_profile == 'aggressive' and funding_status == 'underfunded':
+        elif rp == 'aggressive' and funding_status == 'underfunded':
             return "Hybrid"
         else:
             return "Passive"
     elif 6 <= time_to_goal <= 10:
-        if risk_profile == 'conservative':
+        if rp == 'conservative':
             return "Passive"
-        elif risk_profile == 'moderate':
+        elif rp == 'moderate':
             return "Hybrid" if funding_status == 'balanced' else "Passive"
-        elif risk_profile == 'aggressive':
+        elif rp == 'aggressive':
             return "Active" if funding_status == 'underfunded' else "Hybrid"
     else:
-        if risk_profile == 'conservative':
+        if rp == 'conservative':
             return "Passive"
         elif funding_status == 'underfunded':
             return "Active"
         elif funding_status == 'overfunded':
-            return "Hybrid" if risk_profile != 'conservative' else "Passive"
+            return "Hybrid" if rp != 'conservative' else "Passive"
         else:
-            return "Active" if risk_profile == 'aggressive' else "Hybrid"
+            return "Active" if rp == 'aggressive' else "Hybrid"
 
 # ---------- Min-10% helpers: trim + enforce ----------
 def trim_funds_to_min(df, total_pct, min_pct=10, sort_col=None):
@@ -204,12 +187,40 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     debt_filtered['Weight (%)'] = debt_pct / len(debt_filtered)
     return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
+# ---------- Robust wrapper to call glide explainer with any signature ----------
+def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ratio):
+    """
+    Supports all known signatures:
+      A) explain_glide_story(glide_path=rows)
+      B) explain_glide_story(rows)
+      C) explain_glide_story({years_to_goal, risk_profile, funding_ratio, glide_path})
+    """
+    rows = glide_path_df.to_dict(orient="records")
+    # A) keyword-only (if explainer defines def explain_glide_story(*, glide_path): ...)
+    try:
+        return explain_glide_story(glide_path=rows)
+    except TypeError:
+        pass
+    # B) legacy positional list
+    try:
+        return explain_glide_story(rows)
+    except TypeError:
+        pass
+    # C) new full-context dict
+    return explain_glide_story({
+        "years_to_goal": years_to_goal,
+        "risk_profile": risk_profile,
+        "funding_ratio": float(funding_ratio),
+        "glide_path": rows,
+    })
+
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
     try:
-        #normalize risk profile
+        # normalize risk profile once
         risk = (user_input.risk_profile or "").strip().lower()
+
         # 1) Funding + Strategy + Glide (REAL logic)
         fv, funding_ratio = calculate_funding_ratio(
             user_input.monthly_investment,
@@ -276,10 +287,10 @@ def generate_portfolio(user_input: PortfolioInput):
         # ---------- EXPLAINER BLOCKS ----------
         glide_rows = glide_path.to_dict(orient="records")
 
-        # Your glide_explainer currently expects only the list (legacy signature)
+        # Glide explainer (robust to signature differences)
         glide_block = _call_glide_explainer(
-    glide_path, user_input.years_to_goal, user_input.risk_profile, funding_ratio
-)
+            glide_path, user_input.years_to_goal, risk, funding_ratio
+        )
 
         # Strategy explainer: give richer context
         equity_summary = {
@@ -298,7 +309,7 @@ def generate_portfolio(user_input: PortfolioInput):
             "strategy": strategy,
             "funding_ratio": round(float(funding_ratio), 4),
             "years_to_goal": user_input.years_to_goal,
-            "risk_profile": user_input.risk_profile,
+            "risk_profile": risk,        # normalized
             "glide_path": glide_rows,
             "equity_summary": equity_summary,
             "debt_summary": debt_summary,
