@@ -207,12 +207,12 @@ def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ra
     except TypeError:
         pass
     # C) new full-context dict
-    return explain_glide_story({
-        "years_to_goal": years_to_goal,
-        "risk_profile": risk_profile,
-        "funding_ratio": float(funding_ratio),
-        "glide_path": rows,
-    })
+    return explain_glide_story(
+    years_to_goal=years_to_goal,
+    risk_profile=risk_profile,
+    funding_ratio=float(funding_ratio),
+    glide_path=rows,
+)
 
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
