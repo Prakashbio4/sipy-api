@@ -271,23 +271,22 @@ def generate_portfolio(user_input: PortfolioInput):
         # ---------- EXPLAINER BLOCKS: Call with CORRECT signatures ----------
 
         # Glide explainer call (requires a single dictionary)
-        glide_path_rows = glide_path.to_dict(orient="records")
         glide_context = {
             "years_to_goal": user_input.years_to_goal,
             "risk_profile": user_input.risk_profile,
             "funding_ratio": float(funding_ratio),
-            "glide_path": glide_path_rows
+            "glide_path": glide_path.to_dict(orient="records")
         }
         glide_block = explain_glide_story(glide_context)
 
-
-        # Strategy explainer call (requires four separate arguments)
-        strategy_block = explain_strategy_story(
-            strategy,
-            user_input.years_to_goal,
-            user_input.risk_profile,
-            float(funding_ratio)
-        )
+        # Strategy explainer call (requires a single dictionary)
+        strategy_context = {
+            "strategy": strategy,
+            "years_to_goal": user_input.years_to_goal,
+            "risk_profile": user_input.risk_profile,
+            "funding_ratio": float(funding_ratio)
+        }
+        strategy_block = explain_strategy_story(strategy_context)
 
         # Portfolio explainer call (requires a single DataFrame)
         portfolio_block = explain_portfolio_story(final_portfolio)
@@ -298,7 +297,7 @@ def generate_portfolio(user_input: PortfolioInput):
             # Raw engine outputs (backward-compatible)
             "strategy": strategy,
             "funding_ratio": round(float(funding_ratio), 4),
-            "glide_path": glide_path_rows,
+            "glide_path": glide_path.to_dict(orient="records"),
             "portfolio": final_portfolio.to_dict(orient="records"),
 
             # Explainer blocks
