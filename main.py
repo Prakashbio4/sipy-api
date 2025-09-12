@@ -1,27 +1,37 @@
 # ===================== main.py =====================
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import numpy as np
 import os
+from fastapi.middleware.cors import CORSMiddleware
 
-__API_BUILD__ = "strategy-fix-001"  # bump this to verify deploys via /health
 
 # === Explainers (stories layer) ===
+# NOTE: These are local files, not remote libraries
 from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
 from portfolio_explainer import explain_portfolio_story
 
+
+__API_BUILD__ = "final-fix-001"
 app = FastAPI(title="SIPY Investment Engine API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
 
 # === Load data once at app startup ===
 def _load_csvs():
     try:
-        # Your latest CSVs live under data/
         active_eq = pd.read_csv("data/active_equity_portfolio.csv")
         passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
         hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
-        tmf = pd.read_csv("data/tmf_selected.csv")  # loaded; wire-in later if needed
+        tmf = pd.read_csv("data/tmf_selected.csv")
         duration_debt = pd.read_csv("data/debt_duration_selected.csv")
         print("✅ All CSVs loaded successfully.")
         return active_eq, passive_eq, hybrid_eq, tmf, duration_debt
@@ -187,49 +197,6 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     debt_filtered['Weight (%)'] = debt_pct / len(debt_filtered)
     return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
-# ---------- Robust wrapper to call glide explainer with any signature ----------
-def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ratio):
-    """
-    Supports all known signatures:
-      A) explain_glide_story(glide_path=rows)
-      B) explain_glide_story(rows)
-      C) explain_glide_story({years_to_goal, risk_profile, funding_ratio, glide_path})
-      D) explain_glide_story(common_context, glide_path_data)
-    """
-    rows = glide_path_df.to_dict(orient="records")
-    common_context = {
-        "user": {"risk_preference": risk_profile},
-        "goal": {"years_to_goal": years_to_goal},
-        "funding_ratio": float(funding_ratio)
-    }
-    glide_path_data = {"bands": rows}
-
-    # D) new: try passing two dicts
-    try:
-        return explain_glide_story(common_context, glide_path_data)
-    except TypeError:
-        pass
-        
-    # A) keyword-only (if explainer defines def explain_glide_story(*, glide_path): ...)
-    try:
-        return explain_glide_story(glide_path=rows)
-    except TypeError:
-        pass
-        
-    # B) legacy positional list
-    try:
-        return explain_glide_story(rows)
-    except TypeError:
-        pass
-    
-    # C) old full-context dict
-    return explain_glide_story({
-        "years_to_goal": years_to_goal,
-        "risk_profile": risk_profile,
-        "funding_ratio": float(funding_ratio),
-        "glide_path": rows,
-    })
-
 
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
@@ -238,7 +205,7 @@ def generate_portfolio(user_input: PortfolioInput):
         # normalize risk profile once
         risk = (user_input.risk_profile or "").strip().lower()
 
-        # 1) Funding + Strategy + Glide (REAL logic)
+        # 1) Funding + Strategy + Glide
         fv, funding_ratio = calculate_funding_ratio(
             user_input.monthly_investment,
             user_input.target_corpus,
@@ -249,7 +216,7 @@ def generate_portfolio(user_input: PortfolioInput):
             user_input.years_to_goal, funding_ratio, risk
         )
 
-        # Use Year-1 buckets for construction; ensure non-zero bucket floors (defensive)
+        # Use Year-1 buckets for construction
         glide_equity_pct = int(glide_path.iloc[0]['Equity Allocation (%)'])
         if 0 < glide_equity_pct < 10:
             glide_equity_pct = 10
@@ -301,66 +268,40 @@ def generate_portfolio(user_input: PortfolioInput):
         if final_portfolio['Weight (%)'].sum() != 100:
             raise ValueError("Final portfolio does not sum to 100%.")
 
-        # ---------- EXPLAINER BLOCKS ----------
-        glide_rows = glide_path.to_dict(orient="records")
+        # ---------- EXPLAINER BLOCKS: Call with CORRECT signatures ----------
 
-        # Glide explainer (robust to signature differences)
-        glide_block = _call_glide_explainer(
-            glide_path, user_input.years_to_goal, risk, funding_ratio
+        # Glide explainer call (requires two dicts)
+        glide_path_rows = glide_path.to_dict(orient="records")
+        common_context = {
+            "user": {"risk_preference": risk},
+            "goal": {"years_to_goal": user_input.years_to_goal},
+            "funding_ratio": float(funding_ratio)
+        }
+        glide_path_data = {"bands": glide_path_rows}
+        glide_block = explain_glide_story(common_context, glide_path_data)
+
+
+        # Strategy explainer call (requires four separate arguments)
+        strategy_block = explain_strategy_story(
+            strategy,
+            user_input.years_to_goal,
+            user_input.risk_profile,
+            float(funding_ratio)
         )
 
-        # Strategy explainer: give richer context
-        equity_summary = {
-            "bucket_pct": int(glide_equity_pct),
-            "fund_count": int((final_portfolio['Category'] == 'Equity').sum()),
-            "subcats": (final_portfolio[final_portfolio['Category'] == 'Equity']['Sub-category']
-                        .value_counts().to_dict()),
-        }
-        debt_summary = {
-            "bucket_pct": int(glide_debt_pct),
-            "fund_count": int((final_portfolio['Category'] == 'Debt').sum()),
-            "subcats": (final_portfolio[final_portfolio['Category'] == 'Debt']['Sub-category']
-                        .value_counts().to_dict()),
-        }
-        strategy_ctx = {
-            "strategy": strategy,
-            "funding_ratio": round(float(funding_ratio), 4),
-            "years_to_goal": user_input.years_to_goal,
-            "risk_profile": risk,        # normalized
-            "glide_path": glide_rows,
-            "equity_summary": equity_summary,
-            "debt_summary": debt_summary,
-        }
-        try:
-            # CORRECTED CALL: Pass the three required arguments as separate positional arguments
-            strategy_block = explain_strategy_story(
-                user_input.years_to_goal,
-                risk,
-                float(funding_ratio)
-            )
-        except TypeError as e:
-            # Fallback to the dictionary approach if the positional call fails
-            msg = str(e).lower()
-            if "unexpected" in msg or "positional" in msg or "keyword" in msg:
-                strategy_block = explain_strategy_story({
-                    "strategy": strategy,
-                    "funding_ratio": float(funding_ratio)
-                })
-            else:
-                raise
-
-        # Portfolio explainer: pass the final DF
+        # Portfolio explainer call (requires a single DataFrame)
         portfolio_block = explain_portfolio_story(final_portfolio)
+
 
         # ---------- RESPONSE ----------
         return {
             # Raw engine outputs (backward-compatible)
             "strategy": strategy,
             "funding_ratio": round(float(funding_ratio), 4),
-            "glide_path": glide_rows,
+            "glide_path": glide_path_rows,
             "portfolio": final_portfolio.to_dict(orient="records"),
 
-            # Explainer blocks (new)
+            # Explainer blocks
             "glide_explainer": glide_block,
             "strategy_explainer": strategy_block,
             "portfolio_explainer": portfolio_block,
