@@ -172,7 +172,7 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     allowed = ['Liquid'] if time_to_goal > 3 else ['Liquid', 'Ultra Short']
     debt_filtered = duration_debt_df[duration_debt_df['Sub-category'].str.strip().isin(allowed)].copy()
     if debt_filtered.empty:
-        raise ValueError(⚠️ No suitable debt funds found for the selected duration.")
+        raise ValueError("⚠️ No suitable debt funds found for the selected duration.")
     debt_filtered = standardize_fund_col(debt_filtered)
     debt_filtered['Category'] = 'Debt'
     debt_filtered = trim_funds_to_min(
@@ -186,15 +186,17 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
     try:
+        #normalize risk profile
+        risk = (user_input.risk_profile or "").strip().lower()
         # 1) Funding + Strategy + Glide (REAL logic)
         fv, funding_ratio = calculate_funding_ratio(
             user_input.monthly_investment,
             user_input.target_corpus,
             user_input.years_to_goal
         )
-        strategy = choose_strategy(user_input.years_to_goal, user_input.risk_profile, funding_ratio)
+        strategy = choose_strategy(user_input.years_to_goal, risk, funding_ratio)
         glide_path = generate_step_down_glide_path(
-            user_input.years_to_goal, funding_ratio, user_input.risk_profile
+            user_input.years_to_goal, funding_ratio, risk
         )
 
         # Use Year-1 buckets for construction; ensure non-zero bucket floors (defensive)
