@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import os
 
-__API_BUILD__ = "glide-fix-004"  # bump this to verify deploys via /health
+__API_BUILD__ = "glide-fix-005"  # bump this to verify deploys via /health
 
 # === Explainers (stories layer) ===
 from glide_explainer import explain_glide_story
@@ -194,19 +194,35 @@ def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ra
       A) explain_glide_story(glide_path=rows)
       B) explain_glide_story(rows)
       C) explain_glide_story({years_to_goal, risk_profile, funding_ratio, glide_path})
+      D) explain_glide_story(common_context, glide_path_data)
     """
     rows = glide_path_df.to_dict(orient="records")
+    common_context = {
+        "user": {"risk_preference": risk_profile},
+        "goal": {"years_to_goal": years_to_goal},
+        "funding_ratio": float(funding_ratio)
+    }
+    glide_path_data = {"bands": rows}
+
+    # D) new: try passing two dicts
+    try:
+        return explain_glide_story(common_context, glide_path_data)
+    except TypeError:
+        pass
+        
     # A) keyword-only (if explainer defines def explain_glide_story(*, glide_path): ...)
     try:
         return explain_glide_story(glide_path=rows)
     except TypeError:
         pass
+        
     # B) legacy positional list
     try:
         return explain_glide_story(rows)
     except TypeError:
         pass
-    # C) new full-context dict
+    
+    # C) old full-context dict
     return explain_glide_story({
         "years_to_goal": years_to_goal,
         "risk_profile": risk_profile,
