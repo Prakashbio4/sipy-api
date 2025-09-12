@@ -340,6 +340,21 @@ def explain_strategy(req: StrategyExplainRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+# ================= API Endpoint: Explain Portfolio (NEW) =================
+from portfolio_explainer import explain_portfolio_story
+
+class PortfolioExplainRequest(BaseModel):
+    portfolio: list  # list of {Fund, Category, Sub-category, Weight (%)}
+
+@app.post("/explain/portfolio")
+def explain_portfolio(req: PortfolioExplainRequest) -> Dict[str, Any]:
+    try:
+        df = pd.DataFrame(req.portfolio)
+        return explain_portfolio_story(df)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 
 # ================= Entrypoint =================
 if __name__ == "__main__":
