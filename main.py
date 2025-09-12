@@ -341,15 +341,23 @@ def explain_strategy(req: StrategyExplainRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 # ================= API Endpoint: Explain Portfolio (NEW) =================
-from portfolio_explainer import explain_portfolio_story
+class FundItem(BaseModel):
+    Fund: str
+    Category: str
+    Sub_category: str
+    Weight: float
 
 class PortfolioExplainRequest(BaseModel):
-    portfolio: list  # list of {Fund, Category, Sub-category, Weight (%)}
+    portfolio: list[FundItem]
 
 @app.post("/explain/portfolio")
-def explain_portfolio(req: PortfolioExplainRequest) -> Dict[str, Any]:
+def explain_portfolio(req: PortfolioExplainRequest):
+    """
+    Returns a plain-language story about the portfolio funds.
+    Each fund should include Fund, Category, Sub_category, and Weight.
+    """
     try:
-        df = pd.DataFrame(req.portfolio)
+        df = pd.DataFrame([f.dict() for f in req.portfolio])
         return explain_portfolio_story(df)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
