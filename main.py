@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import os
 
-__API_BUILD__ = "glide-fix-005"  # bump this to verify deploys via /health
+__API_BUILD__ = "strategy-fix-001"  # bump this to verify deploys via /health
 
 # === Explainers (stories layer) ===
 from glide_explainer import explain_glide_story
@@ -332,8 +332,14 @@ def generate_portfolio(user_input: PortfolioInput):
             "debt_summary": debt_summary,
         }
         try:
-            strategy_block = explain_strategy_story(strategy_ctx)
+            # CORRECTED CALL: Pass the three required arguments as separate positional arguments
+            strategy_block = explain_strategy_story(
+                user_input.years_to_goal,
+                risk,
+                float(funding_ratio)
+            )
         except TypeError as e:
+            # Fallback to the dictionary approach if the positional call fails
             msg = str(e).lower()
             if "unexpected" in msg or "positional" in msg or "keyword" in msg:
                 strategy_block = explain_strategy_story({
