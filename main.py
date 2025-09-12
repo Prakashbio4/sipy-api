@@ -1,13 +1,13 @@
-# ===================== main.py =====================
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import os
 
-__API_BUILD__ = "glide-fix-003"  # bump this to verify deploys via /health
+__API_BUILD__ = "glide-fix-003" # bump this to verify deploys via /health
 
 # === Explainers (stories layer) ===
+# Assuming these files and functions exist and are correct
 from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
 from portfolio_explainer import explain_portfolio_story
@@ -29,6 +29,7 @@ def _load_csvs():
         print("❌ Failed to load CSVs:", e)
         raise
 
+# This will load the data when the script starts
 active_eq, passive_eq, hybrid_eq, tmf, duration_debt = _load_csvs()
 
 # === Input Schema ===
@@ -206,13 +207,14 @@ def _call_glide_explainer(glide_path_df, years_to_goal, risk_profile, funding_ra
         return explain_glide_story(rows)
     except TypeError:
         pass
-    # C) new full-context dict
-    return explain_glide_story(
-    years_to_goal=years_to_goal,
-    risk_profile=risk_profile,
-    funding_ratio=float(funding_ratio),
-    glide_path=rows,
-)
+    # C) new full-context dict (this is the most likely correct one)
+    return explain_glide_story({
+        "years_to_goal": years_to_goal,
+        "risk_profile": risk_profile,
+        "funding_ratio": float(funding_ratio),
+        "glide_path": rows,
+    })
+
 
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
