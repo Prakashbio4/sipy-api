@@ -7,6 +7,7 @@ import json
 import numpy as np
 import os
 from fastapi.middleware.cors import CORSMiddleware
+from pyairtable import Api
 
 
 # === Explainers (stories layer) ===
@@ -328,14 +329,20 @@ AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = "Investor_inputs"
 
-# ⚠️ New initialization for the Airtable object
+# New initialization for the Airtable object
 api = Api(AIRTABLE_API_KEY)
 airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
-
 @app.post("/trigger_processing/")
-async def trigger_processing(payload: AirtableWebhookPayload):
+async def trigger_processing(request: Request): # <-- Change signature here
     try:
+        # Step 1: Read and print the raw JSON body
+        body = await request.json()
+        print("Received webhook payload:", json.dumps(body, indent=2))
+        
+        # Step 2: Now that you have the raw body, use it to create the Pydantic model
+        # This will now fail gracefully in the `try...except` if the payload is bad
+        payload = AirtableWebhookPayload(**body)
         record_id = payload.record_id
         
         # 1. Fetch the data from Airtable using the record_id
@@ -372,7 +379,8 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         return {"status": "success", "record_id": record_id}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process: {e}")# Health check
+        raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
+
 
 @app.get("/health")
 def health():
