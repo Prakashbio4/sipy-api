@@ -311,9 +311,9 @@ def generate_portfolio(user_input: PortfolioInput):
 
 # === PASTE THE NEW ENDPOINT CODE BELOW THIS LINE ===
 
-# --- Corrected trigger_processing endpoint ---
-# Import necessary libraries for Airtable access
-#⚠️ New import for pyairtable
+# =========================================================
+# === Corrected trigger_processing endpoint ===
+# =========================================================
 from pyairtable import Api
 from pydantic import BaseModel
 from typing import Any, Dict
@@ -338,7 +338,6 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         record_id = payload.record_id
         
         # 1. Fetch the data from Airtable using the record_id
-        # ⚠️ The .get() method is now called on the airtable object directly
         record = airtable.get(record_id)
         inputs = record.get('fields', {})
 
@@ -351,7 +350,6 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         }
         
         # 2. Call the existing portfolio generation engine
-        # We wrap it in a try-except to handle potential errors from the engine
         try:
             processed_output = generate_portfolio(PortfolioInput(**user_input_data))
         except Exception as e:
@@ -368,15 +366,13 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
         }
         
-        # ⚠️ The .update() method is now called on the airtable object directly
-        airtable.update(record_id, update_data)
+        airtable.update(record_id, fields=update_data)
 
         return {"status": "success", "record_id": record_id}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process: {e}")# Health check
 
-# Health check
 @app.get("/health")
 def health():
     return {"ok": True, "build": __API_BUILD__}
