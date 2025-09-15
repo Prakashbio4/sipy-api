@@ -311,7 +311,10 @@ def generate_portfolio(user_input: PortfolioInput):
 
 # === PASTE THE NEW ENDPOINT CODE BELOW THIS LINE ===
 
-from airtable import Airtable
+# --- Corrected trigger_processing endpoint ---
+# Import necessary libraries for Airtable access
+#⚠️ New import for pyairtable
+from pyairtable import Api
 from pydantic import BaseModel
 from typing import Any, Dict
 
@@ -322,10 +325,11 @@ class AirtableWebhookPayload(BaseModel):
 # Define the Airtable variables
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = "Investor_inputs"  # NOTE: Updated to match your Airtable name
+AIRTABLE_TABLE_NAME = "Investor_inputs"
 
-
-airtable = Airtable(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, api_key=AIRTABLE_API_KEY)
+# ⚠️ New initialization for the Airtable object
+api = Api(AIRTABLE_API_KEY)
+airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
 
 @app.post("/trigger_processing/")
@@ -334,6 +338,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         record_id = payload.record_id
         
         # 1. Fetch the data from Airtable using the record_id
+        # ⚠️ The .get() method is now called on the airtable object directly
         record = airtable.get(record_id)
         inputs = record.get('fields', {})
 
@@ -363,13 +368,13 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
         }
         
+        # ⚠️ The .update() method is now called on the airtable object directly
         airtable.update(record_id, update_data)
 
         return {"status": "success", "record_id": record_id}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
-
 
 # Health check
 @app.get("/health")
