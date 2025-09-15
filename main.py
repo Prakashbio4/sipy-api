@@ -309,6 +309,68 @@ def generate_portfolio(user_input: PortfolioInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# === PASTE THE NEW ENDPOINT CODE BELOW THIS LINE ===
+
+from airtable import Airtable
+from pydantic import BaseModel
+from typing import Any, Dict
+
+# Pydantic model for the incoming webhook payload
+class AirtableWebhookPayload(BaseModel):
+    record_id: str
+
+# Define the Airtable variables
+AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
+AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = "Investor_inputs"  # NOTE: Updated to match your Airtable name
+
+
+airtable = Airtable(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, api_key=AIRTABLE_API_KEY)
+
+
+@app.post("/trigger_processing/")
+async def trigger_processing(payload: AirtableWebhookPayload):
+    try:
+        record_id = payload.record_id
+        
+        # 1. Fetch the data from Airtable using the record_id
+        record = airtable.get(record_id)
+        inputs = record.get('fields', {})
+
+        # Map Airtable fields to the PortfolioInput pydantic model
+        user_input_data = {
+            "monthly_investment": inputs.get("Monthly Investments"),
+            "target_corpus": inputs.get("Target Corpus"),
+            "years_to_goal": inputs.get("Time Horizon (years)"),
+            "risk_profile": inputs.get("Risk Preference")
+        }
+        
+        # 2. Call the existing portfolio generation engine
+        # We wrap it in a try-except to handle potential errors from the engine
+        try:
+            processed_output = generate_portfolio(PortfolioInput(**user_input_data))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Engine error: {e}")
+
+        # 3. Write the output back to Airtable against the same record_id
+        update_data = {
+            "strategy": processed_output["strategy"],
+            "funding_ratio": processed_output["funding_ratio"],
+            "glide_path": str(processed_output["glide_path"]),
+            "portfolio": str(processed_output["portfolio"]),
+            "glide_explainer_story": processed_output["glide_explainer"]["story"],
+            "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
+            "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
+        }
+        
+        airtable.update(record_id, update_data)
+
+        return {"status": "success", "record_id": record_id}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
+
+
 # Health check
 @app.get("/health")
 def health():
