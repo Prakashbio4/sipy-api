@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import pandas as pd
+import json
 import numpy as np
 import os
 from fastapi.middleware.cors import CORSMiddleware
@@ -359,8 +360,8 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         update_data = {
             "strategy": processed_output["strategy"],
             "funding_ratio": processed_output["funding_ratio"],
-            "glide_path": str(processed_output["glide_path"]),
-            "portfolio": str(processed_output["portfolio"]),
+            "glide_path": json.dumps(processed_output["glide_path"]),
+            "portfolio": json.dumps(processed_output["portfolio"]),
             "glide_explainer_story": processed_output["glide_explainer"]["story"],
             "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
             "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
