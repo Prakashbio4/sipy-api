@@ -1,5 +1,5 @@
 # ===================== main.py =====================
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -311,16 +311,8 @@ def generate_portfolio(user_input: PortfolioInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# === PASTE THE NEW ENDPOINT CODE BELOW THIS LINE ===
 
-# =========================================================
-# === Corrected trigger_processing endpoint ===
-# =========================================================
-from pyairtable import Api
-from pydantic import BaseModel
-from typing import Any, Dict
-
-# Pydantic model for the incoming webhook payload
+# === Pydantic model for the incoming webhook payload ===
 class AirtableWebhookPayload(BaseModel):
     record_id: str
 
@@ -334,15 +326,8 @@ api = Api(AIRTABLE_API_KEY)
 airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
 @app.post("/trigger_processing/")
-async def trigger_processing(request: Request): # <-- Change signature here
+async def trigger_processing(payload: AirtableWebhookPayload):
     try:
-        # Step 1: Read and print the raw JSON body
-        body = await request.json()
-        print("Received webhook payload:", json.dumps(body, indent=2))
-        
-        # Step 2: Now that you have the raw body, use it to create the Pydantic model
-        # This will now fail gracefully in the `try...except` if the payload is bad
-        payload = AirtableWebhookPayload(**body)
         record_id = payload.record_id
         
         # 1. Fetch the data from Airtable using the record_id
