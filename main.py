@@ -210,7 +210,8 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         record_id = payload.record_id
 
         # 1. Fetch the data from Airtable using the record_id
-        record = airtable.get(record_id)
+        # CORRECTION: Call the `get` method on the `investor_inputs_table` object, not the `airtable` object.
+        record = investor_inputs_table.get(record_id)
         inputs = record.get('fields', {})
 
         # Map Airtable fields to the PortfolioInput pydantic model
@@ -243,8 +244,9 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
             "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
         }
-
-        airtable.update(record_id, fields=update_data)
+        
+        # CORRECTION: Call the `update` method on the `investor_inputs_table` object.
+        investor_inputs_table.update(record_id, fields=update_data)
 
         return {"status": "success", "record_id": record_id}
 
