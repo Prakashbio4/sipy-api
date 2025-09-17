@@ -182,10 +182,14 @@ def generate_portfolio(
     )
 
     # Generate explainer stories
-    # CORRECTED LINE BELOW: Removed the second argument
+    # Corrected Line Below: Pass the strategy and portfolio data in a single dictionary
+    portfolio_for_explainer = {
+        "strategy": strategy,
+        "portfolio": portfolio_composition
+    }
     glide_explainer = explain_glide_story(glide_path)
     strategy_explainer = explain_strategy_story(strategy, input.risk_profile, input.years_to_goal)
-    portfolio_explainer = explain_portfolio_story(portfolio_composition)
+    portfolio_explainer = explain_portfolio_story(portfolio_for_explainer)
 
     output = {
         "strategy": strategy,
@@ -198,7 +202,6 @@ def generate_portfolio(
     }
 
     return output
-
 
 # ==================== API Endpoints ====================
 class AirtableWebhookPayload(BaseModel):
