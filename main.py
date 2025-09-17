@@ -104,11 +104,14 @@ def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
         if 0 < debt < 10:
             debt = 10
             equity = 100 - debt
-
-        # The change is on this line:
-        glide_path.append([year, int(equity), int(debt)])
-
-   return pd.DataFrame(glide_path, columns=['Year', 'Equity Allocation (%)', 'Debt Allocation (%)'])
+ 
+# The original code that appends a dictionary
+        glide_path.append({
+            'Year': year,
+            'Equity Allocation (%)': int(equity),
+            'Debt Allocation (%)': int(debt)
+        })
+    return pd.DataFrame(glide_path)
 
 def choose_strategy(time_to_goal, risk_profile, funding_ratio):
     if time_to_goal <= 3:
@@ -339,24 +342,31 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "risk_profile": inputs.get("Risk Preference")
         }
         
-        # 2. Call the existing portfolio generation engine
-        try:
-            processed_output = generate_portfolio(PortfolioInput(**user_input_data))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Engine error: {e}")
+        # === In the trigger_processing function, add this formatting step ===
+    # 2. Call the existing portfolio generation engine
+    try:
+        processed_output = generate_portfolio(PortfolioInput(**user_input_data))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Engine error: {e}")
 
-        # 3. Write the output back to Airtable against the same record_id
-        update_data = {
-            "strategy": processed_output["strategy"],
-            "funding_ratio": processed_output["funding_ratio"],
-            "glide_path": json.dumps(processed_output["glide_path"]),
-            "portfolio": json.dumps(processed_output["portfolio"]),
-            "glide_explainer_story": processed_output["glide_explainer"]["story"],
-            "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
-            "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
-        }
-        
-        airtable.update(record_id, fields=update_data)
+    # Convert the glide_path list to a clean, readable string
+    glide_path_str = ", ".join(
+        f"{{{record['Year']}, {record['Equity Allocation (%)']}, {record['Debt Allocation (%)']}}}"
+        for record in processed_output["glide_path"]
+    )
+
+    # 3. Write the output back to Airtable against the same record_id
+    update_data = {
+        "strategy": processed_output["strategy"],
+        "funding_ratio": processed_output["funding_ratio"],
+        "glide_path": glide_path_str, # Use the new, clean string here
+        "portfolio": json.dumps(processed_output["portfolio"]),
+        "glide_explainer_story": processed_output["glide_explainer"]["story"],
+        "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
+        "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
+    }
+
+    airtable.update(record_id, fields=update_data)
 
         return {"status": "success", "record_id": record_id}
 
