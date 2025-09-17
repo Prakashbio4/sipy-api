@@ -298,7 +298,7 @@ def generate_portfolio(user_input: PortfolioInput):
         return {
             # Raw engine outputs (backward-compatible)
             "strategy": strategy,
-            "funding_ratio": round(float(funding_ratio), 4),
+            "funding_ratio": round(float(funding_ratio), 2),
             "glide_path": glide_path.to_dict(orient="records"),
             "portfolio": final_portfolio.to_dict(orient="records"),
 
@@ -329,7 +329,7 @@ airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 async def trigger_processing(payload: AirtableWebhookPayload):
     try:
         record_id = payload.record_id
-
+        
         # 1. Fetch the data from Airtable using the record_id
         record = airtable.get(record_id)
         inputs = record.get('fields', {})
@@ -338,10 +338,10 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         user_input_data = {
             "monthly_investment": inputs.get("Monthly Investments"),
             "target_corpus": inputs.get("Target Corpus"),
-            "years_to_goal": inputs.get("Time Horizon (years)"),
+            "years_to_goal": inputs.get("Time to goal"),
             "risk_profile": inputs.get("Risk Preference")
         }
-
+        
         # 2. Call the existing portfolio generation engine
         try:
             processed_output = generate_portfolio(PortfolioInput(**user_input_data))
@@ -358,7 +358,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         update_data = {
             "strategy": processed_output["strategy"],
             "funding_ratio": processed_output["funding_ratio"],
-            "glide_path": glide_path_str, # Use the new, clean string here
+            "glide_path": glide_path_str,
             "portfolio": json.dumps(processed_output["portfolio"]),
             "glide_explainer_story": processed_output["glide_explainer"]["story"],
             "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
@@ -371,6 +371,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
+
 
 @app.get("/health")
 def health():
