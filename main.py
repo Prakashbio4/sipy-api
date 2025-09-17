@@ -1,5 +1,5 @@
 # ===================== main.py =====================
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -9,15 +9,13 @@ import os
 from fastapi.middleware.cors import CORSMiddleware
 from pyairtable import Api
 
-
 # === Explainers (stories layer) ===
 # NOTE: These are local files, not remote libraries
 from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
 from portfolio_explainer import explain_portfolio_story
 
-
-__API_BUILD__ = "final-fix-001"
+__API_BUILD__ = "final-fix-compact-json-002"
 app = FastAPI(title="SIPY Investment Engine API")
 
 app.add_middleware(
@@ -26,6 +24,52 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
+# ---------- Helpers: input sanitization & compact JSON ----------
+def _to_number(v) -> float:
+    """Convert strings like '25k', '25,000' -> 25000."""
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(",", "").lower()
+    if s.endswith("k"):
+        return float(s[:-1]) * 1000
+    return float(s)
+
+def _req_int(name: str, v) -> int:
+    try:
+        return int(float(_to_number(v)))
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"Missing/invalid integer: {name}")
+
+def _req_float(name: str, v) -> float:
+    try:
+        return float(_to_number(v))
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"Missing/invalid number: {name}")
+
+def compact_glide_verbose_to_array(glide_verbose: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Input: [{"Year":1,"Equity Allocation (%)":70,"Debt Allocation (%)":30}, ...]
+    Output (compact): {"v":1,"g":[[1,70,30],[2,70,30],...]}
+    """
+    arr = []
+    for item in glide_verbose:
+        y = int(item.get("Year"))
+        e = int(round(float(item.get("Equity Allocation (%)", 0))))
+        d = int(round(float(item.get("Debt Allocation (%)", 0))))
+        arr.append([y, e, d])
+    return {"v": 1, "g": arr}
+
+def minified_json(obj: Any) -> str:
+    """Dump JSON with no whitespace to cut size."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+def safe_store(text: str, max_len: int = 45000) -> str:
+    """Trim text if it exceeds Long text comfort zone; add marker if truncated."""
+    if text is None:
+        return ""
+    return text if len(text) <= max_len else text[: max_len - 12] + "...[TRUNC]"
 
 # === Load data once at app startup ===
 def _load_csvs():
@@ -60,7 +104,7 @@ def calculate_funding_ratio(monthly_investment, target_corpus, years):
 
 def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
     """
-    Same logic as before, with floors so any non-zero bucket >= 10%.
+    Same glide path logic; with floors so any non-zero bucket >= 10%.
     """
     funding_ratio = float(funding_ratio)
     glide_path = []
@@ -116,6 +160,7 @@ def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
 def choose_strategy(time_to_goal, risk_profile, funding_ratio):
     if time_to_goal <= 3:
         return "Passive"
+
     if funding_ratio >= 1.3:
         funding_status = 'overfunded'
     elif funding_ratio < 0.7:
@@ -199,7 +244,6 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     debt_filtered['Weight (%)'] = debt_pct / len(debt_filtered)
     return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
-
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
@@ -270,9 +314,7 @@ def generate_portfolio(user_input: PortfolioInput):
         if final_portfolio['Weight (%)'].sum() != 100:
             raise ValueError("Final portfolio does not sum to 100%.")
 
-        # ---------- EXPLAINER BLOCKS: Call with CORRECT signatures ----------
-
-        # Glide explainer call (requires a single dictionary)
+        # ---------- EXPLAINER BLOCKS ----------
         glide_context = {
             "years_to_goal": user_input.years_to_goal,
             "risk_profile": user_input.risk_profile,
@@ -281,7 +323,6 @@ def generate_portfolio(user_input: PortfolioInput):
         }
         glide_block = explain_glide_story(glide_context)
 
-        # Strategy explainer call (requires a single dictionary)
         strategy_context = {
             "strategy": strategy,
             "years_to_goal": user_input.years_to_goal,
@@ -290,19 +331,14 @@ def generate_portfolio(user_input: PortfolioInput):
         }
         strategy_block = explain_strategy_story(strategy_context)
 
-        # Portfolio explainer call (requires a single DataFrame)
         portfolio_block = explain_portfolio_story(final_portfolio)
-
 
         # ---------- RESPONSE ----------
         return {
-            # Raw engine outputs (backward-compatible)
             "strategy": strategy,
             "funding_ratio": round(float(funding_ratio), 4),
             "glide_path": glide_path.to_dict(orient="records"),
             "portfolio": final_portfolio.to_dict(orient="records"),
-
-            # Explainer blocks
             "glide_explainer": glide_block,
             "strategy_explainer": strategy_block,
             "portfolio_explainer": portfolio_block,
@@ -311,61 +347,64 @@ def generate_portfolio(user_input: PortfolioInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # === Pydantic model for the incoming webhook payload ===
 class AirtableWebhookPayload(BaseModel):
     record_id: str
 
-# Define the Airtable variables
+# Airtable config
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = "Investor_inputs"
+AIRTABLE_TABLE_NAME = "Investor_inputs"  # you can switch to table ID `tbl...` if preferred
 
-# New initialization for the Airtable object
 api = Api(AIRTABLE_API_KEY)
 airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
 @app.post("/trigger_processing/")
-async def trigger_processing(payload: AirtableWebhookPayload):
+async def trigger_processing(payload: AirtableWebhookPayload, authorization: Optional[str] = Header(None)):
     try:
         record_id = payload.record_id
-        
-        # 1. Fetch the data from Airtable using the record_id
+
+        # 1) Fetch the Airtable record
         record = airtable.get(record_id)
         inputs = record.get('fields', {})
 
-        # Map Airtable fields to the PortfolioInput pydantic model
-        user_input_data = {
-            "monthly_investment": inputs.get("Monthly Investments"),
-            "target_corpus": inputs.get("Target Corpus"),
-            "years_to_goal": inputs.get("Time Horizon (years)"),
-            "risk_profile": inputs.get("Risk Preference")
-        }
-        
-        # 2. Call the existing portfolio generation engine
-        try:
-            processed_output = generate_portfolio(PortfolioInput(**user_input_data))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Engine error: {e}")
+        # 2) Map inputs with tolerant keys (handles your earlier naming variants)
+        monthly_raw = inputs.get("Monthly Investment", inputs.get("Monthly Investments"))
+        target_raw  = inputs.get("Target Corpus")
+        years_raw   = inputs.get("Time to Goal (years)", inputs.get("Time Horizon (years)"))
+        risk_raw    = inputs.get("Risk Preference")
 
-        # 3. Write the output back to Airtable against the same record_id
-        update_data = {
-            "strategy": processed_output["strategy"],
-            "funding_ratio": processed_output["funding_ratio"],
-            "glide_path": json.dumps(processed_output["glide_path"]),
-            "portfolio": json.dumps(processed_output["portfolio"]),
-            "glide_explainer_story": processed_output["glide_explainer"]["story"],
-            "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
-            "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
+        user_input_data = {
+            "monthly_investment": _req_float("Monthly Investment", monthly_raw),
+            "target_corpus":      _req_float("Target Corpus", target_raw),
+            "years_to_goal":      _req_int("Time to Goal (years)", years_raw),
+            "risk_profile":       (risk_raw or "").strip()
         }
-        
+
+        # 3) Run the engine
+        processed_output = generate_portfolio(PortfolioInput(**user_input_data))
+
+        # 4) Compact + minify JSON payloads for Airtable Long text fields
+        compact_glide = compact_glide_verbose_to_array(processed_output["glide_path"])
+        glide_json = minified_json(compact_glide)
+        portfolio_json = minified_json(processed_output["portfolio"])
+
+        # 5) Write back to the SAME record using your exact Long text columns
+        update_data = {
+            "glide_path":               safe_store(glide_json),
+            "portfolio":                safe_store(portfolio_json),
+            "glide_explainer_story":    processed_output["glide_explainer"]["story"],
+            "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
+            "portfolio_explainer_story":processed_output["portfolio_explainer"]["story"],
+        }
         airtable.update(record_id, fields=update_data)
 
         return {"status": "success", "record_id": record_id}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
-
 
 @app.get("/health")
 def health():
