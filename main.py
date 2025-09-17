@@ -329,7 +329,7 @@ airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 async def trigger_processing(payload: AirtableWebhookPayload):
     try:
         record_id = payload.record_id
-        
+
         # 1. Fetch the data from Airtable using the record_id
         record = airtable.get(record_id)
         inputs = record.get('fields', {})
@@ -341,18 +341,24 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "years_to_goal": inputs.get("Time Horizon (years)"),
             "risk_profile": inputs.get("Risk Preference")
         }
-        
+
         # 2. Call the existing portfolio generation engine
         try:
             processed_output = generate_portfolio(PortfolioInput(**user_input_data))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Engine error: {e}")
 
+        # Corrected: Convert the glide_path list to a clean, readable string
+        glide_path_str = ", ".join(
+            f"{{{item['Year']}, {item['Equity Allocation (%)']}, {item['Debt Allocation (%)']}}}"
+            for item in processed_output["glide_path"]
+        )
+
         # 3. Write the output back to Airtable against the same record_id
         update_data = {
             "strategy": processed_output["strategy"],
             "funding_ratio": processed_output["funding_ratio"],
-            "glide_path": json.dumps(processed_output["glide_path"]),
+            "glide_path": glide_path_str, # Use the new, clean string here
             "portfolio": json.dumps(processed_output["portfolio"]),
             "glide_explainer_story": processed_output["glide_explainer"]["story"],
             "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
@@ -365,7 +371,6 @@ async def trigger_processing(payload: AirtableWebhookPayload):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
-
 
 @app.get("/health")
 def health():
