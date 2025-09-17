@@ -214,8 +214,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         record_id = payload.record_id
 
         # 1. Fetch the data from Airtable using the record_id
-        # CORRECTION: Call the `get` method on the `investor_inputs_table` object, not the `airtable` object.
-        record = investor_inputs_table.get(record_id)
+        record = airtable.get(record_id)
         inputs = record.get('fields', {})
 
         # Map Airtable fields to the PortfolioInput pydantic model
@@ -232,10 +231,10 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Engine error: {e}")
 
-        # Convert the glide_path list to a clean, readable string
+        # Corrected line: Convert the glide_path list to a clean, readable string
         glide_path_str = ", ".join(
-            f"{{{record['Year']}, {record['Equity Allocation (%)']}, {record['Debt Allocation (%)']}}}"
-            for record in processed_output["glide_path"]
+            f"{{{item['Year']}, {item['Equity Allocation (%)']}, {item['Debt Allocation (%)']}}}"
+            for item in processed_output["glide_path"]
         )
 
         # 3. Write the output back to Airtable against the same record_id
@@ -249,8 +248,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
         }
         
-        # CORRECTION: Call the `update` method on the `investor_inputs_table` object.
-        investor_inputs_table.update(record_id, fields=update_data)
+        airtable.update(record_id, fields=update_data)
 
         return {"status": "success", "record_id": record_id}
 
