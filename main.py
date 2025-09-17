@@ -1,443 +1,374 @@
 # ===================== main.py =====================
-import os
-import re
-import json
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-
-import pandas as pd
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Any, Dict, List, Optional
+import pandas as pd
+import json
+import numpy as np
+import os
+from fastapi.middleware.cors import CORSMiddleware
 from pyairtable import Api
 
-# ---------- Local explainers (must exist next to this file) ----------
+
+# === Explainers (stories layer) ===
+# NOTE: These are local files, not remote libraries
 from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
 from portfolio_explainer import explain_portfolio_story
 
-__API_BUILD__ = "sipy-fix-fields-fr2-glidecap-funds-2025-09-17"
 
+__API_BUILD__ = "final-fix-001"
 app = FastAPI(title="SIPY Investment Engine API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# =================== Helpers ===================
 
-INR_UNITS = [
-    (re.compile(r"(crore|cr)\b", re.I), 10_000_000.0),
-    (re.compile(r"(lakh|lac|l)\b", re.I), 100_000.0),
-    (re.compile(r"k\b", re.I), 1_000.0),
-]
-
-def _to_number_india(v) -> float:
-    """
-    Parse Airtable text like: '₹25,00,000', '25L', '1.5 Cr', '25k', '2,50,000'
-    -> float rupees.
-    """
-    if v is None:
-        return 0.0
-    if isinstance(v, (int, float)):
-        return float(v)
-
-    s = str(v).strip()
-    # Drop currency symbols and spaces/commas/underscores
-    s_clean = re.sub(r"[₹,\s_]", "", s, flags=re.U)
-
-    # Unit multiplier (Cr, Lakh/Lac/L, k)
-    mult = 1.0
-    for pat, m in INR_UNITS:
-        if pat.search(s):
-            mult = m
-            s_clean = pat.sub("", s_clean)
-
-    # Keep only digits and decimal point
-    s_num = re.sub(r"[^0-9.]", "", s_clean)
-    if s_num in ("", "."):
-        return 0.0
-
+# === Load data once at app startup ===
+def _load_csvs():
     try:
-        return float(s_num) * mult
-    except Exception:
-        return 0.0
+        active_eq = pd.read_csv("data/active_equity_portfolio.csv")
+        passive_eq = pd.read_csv("data/passive_equity_portfolio.csv")
+        hybrid_eq = pd.read_csv("data/hybrid_equity_portfolio.csv")
+        tmf = pd.read_csv("data/tmf_selected.csv")
+        duration_debt = pd.read_csv("data/debt_duration_selected.csv")
+        print("✅ All CSVs loaded successfully.")
+        return active_eq, passive_eq, hybrid_eq, tmf, duration_debt
+    except Exception as e:
+        print("❌ Failed to load CSVs:", e)
+        raise
 
-def _req_float(name: str, v) -> float:
-    try:
-        return float(_to_number_india(v))
-    except Exception:
-        raise HTTPException(status_code=422, detail=f"Missing/invalid number: {name}")
+active_eq, passive_eq, hybrid_eq, tmf, duration_debt = _load_csvs()
 
-def _req_int(name: str, v) -> int:
-    if v is None:
-        raise HTTPException(status_code=422, detail=f"Missing/invalid integer: {name}")
-    if isinstance(v, (int, float)):
-        return int(v)
-    s = str(v).strip()
-    s_digits = re.sub(r"[^\d]", "", s)
-    if s_digits == "":
-        raise HTTPException(status_code=422, detail=f"Missing/invalid integer: {name}")
-    return int(s_digits)
-
-def compact_glide_verbose_to_array(glide_verbose: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Input: [{"Year":1,"Equity Allocation (%)":70,"Debt Allocation (%)":30}, ...]
-    Output: {"v":1,"g":[[1,70,30],[2,70,30],...]}
-    """
-    arr = []
-    for item in glide_verbose:
-        y = int(item.get("Year"))
-        e = int(round(float(item.get("Equity Allocation (%)", 0))))
-        d = int(round(float(item.get("Debt Allocation (%)", 0))))
-        arr.append([y, e, d])
-    return {"v": 1, "g": arr}
-
-def minified_json(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-
-def safe_store(text: str, max_len: int = 45000) -> str:
-    if text is None:
-        return ""
-    return text if len(text) <= max_len else text[: max_len - 12] + "...[TRUNC]"
-
-# =================== CSV loading ===================
-def _load_csv(path: str) -> Optional[pd.DataFrame]:
-    try:
-        df = pd.read_csv(path)
-        return df
-    except Exception:
-        return None
-
-ACTIVE_EQ    = _load_csv("data/active_equity_portfolio.csv")
-PASSIVE_EQ   = _load_csv("data/passive_equity_portfolio.csv")
-HYBRID_EQ    = _load_csv("data/hybrid_equity_portfolio.csv")
-DURATION_DEBT= _load_csv("data/debt_duration_selected.csv")
-
-def _standardize_fund_col(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None:
-        return pd.DataFrame()
-    if "Fund" in df.columns:
-        return df
-    cand = [c for c in df.columns if re.search(r"(fund|scheme|name)", c, re.I)]
-    if cand:
-        return df.rename(columns={cand[0]: "Fund"})
-    out = df.copy()
-    out["Fund"] = out.index.astype(str)
-    return out
-
-def _trim_rank_and_scale(df: pd.DataFrame, total_pct: int, min_pct: int = 10, sort_cols: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Pick a handful of top rows, enforce min % per fund, normalize to total_pct, round to 1% then to 5%.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["Fund","Category","Sub-category","Weight (%)"])
-
-    df = df.copy()
-    df = _standardize_fund_col(df)
-    # Prefer explicit ranking/score columns if present
-    sort_cols = sort_cols or [c for c in ["Score","Rank","AUM","Sharpe","Return"] if c in df.columns]
-    if sort_cols:
-        df = df.sort_values(sort_cols, ascending=[False]*len(sort_cols))
-    # choose up to total_pct/min_pct funds (e.g., 60%/10% -> max 6 funds)
-    max_funds = max(1, total_pct // min_pct)
-    df = df.head(max_funds).copy()
-
-    # Initial equal weighting
-    if "Weight (%)" not in df.columns:
-        df["Weight (%)"] = total_pct / len(df)
-    # Round to 1, enforce minimum
-    df["Weight (%)"] = df["Weight (%)"].apply(lambda x: max(min_pct, round(float(x))))
-    # Normalize back to total_pct
-    s = df["Weight (%)"].sum()
-    df["Weight (%)"] = df["Weight (%)"] / (s if s else 1) * total_pct
-    # Round to nearest 5 for cleaner numbers
-    df["Weight (%)"] = df["Weight (%)"].apply(lambda x: int(round(float(x)/5.0)*5))
-    # Fix rounding drift
-    diff = total_pct - int(df["Weight (%)"].sum())
-    if diff != 0:
-        idx = df["Weight (%)"].idxmax()
-        df.at[idx, "Weight (%)"] = int(df.at[idx, "Weight (%)"]) + diff
-    return df[["Fund","Weight (%)"]]
-
-# =================== Core investment logic ===================
-
+# === Input Schema ===
 class PortfolioInput(BaseModel):
     monthly_investment: float
     target_corpus: float
     years_to_goal: int
-    risk_profile: str  # 'Conservative' | 'Moderate' | 'Aggressive' (case-insensitive)
+    risk_profile: str  # 'conservative', 'moderate', 'aggressive'
 
-def calculate_funding_ratio(monthly_investment: float, target_corpus: float, years: int):
-    """
-    Simple annuity FV to estimate funding ratio.
-    """
-    expected_return = 0.13  # 13% annual
-    r = (1 + expected_return) ** (1/12) - 1
-    n = max(0, years) * 12
-    fv = monthly_investment * (((1 + r) ** n - 1) / r) if r > 0 else monthly_investment * n
-    fr = fv / target_corpus if target_corpus > 0 else 0.0
-    return fv, fr
+# ----------------- Core Utility Functions -----------------
+def calculate_funding_ratio(monthly_investment, target_corpus, years):
+    expected_return = 0.13  # fixed expected return (annual, 13%)
+    r = (1 + expected_return) ** (1/12) - 1  # monthly return
+    n = years * 12
+    fv = monthly_investment * (((1 + r) ** n - 1) / r)
+    return fv, fv / target_corpus
 
-def choose_strategy(time_to_goal: int, risk_profile: str, funding_ratio: float) -> str:
-    rp = (risk_profile or "").strip().lower()
-    if time_to_goal <= 3:
-        return "Passive"
-    if funding_ratio < 0.8 and rp == "aggressive":
-        return "Active"
-    if rp == "conservative":
-        return "Passive"
-    return "Hybrid"
-
-def generate_step_down_glide_path(time_to_goal: int, funding_ratio: float, risk_profile: str) -> pd.DataFrame:
+def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
     """
-    Yearly glide path: linear step-down from base equity to 10%.
-    Always returns exactly `time_to_goal` rows (1..N).
+    Same logic as before, with floors so any non-zero bucket >= 10%.
     """
-    rp = (risk_profile or "").strip().lower()
+    funding_ratio = float(funding_ratio)
+    glide_path = []
 
-    # Base equity heuristic
-    if funding_ratio >= 1.2:
-        base_equity = 75
-    elif funding_ratio >= 0.9:
+    short_goal_equity_cap = 30 if time_to_goal <= 3 else 100
+
+    if funding_ratio > 2.0:
         base_equity = 70
+        derisk_start = int(time_to_goal * 0.4)
+    elif funding_ratio > 1.0:
+        base_equity = 80
+        derisk_start = int(time_to_goal * 0.5)
     else:
-        base_equity = 80  # slightly higher if underfunded
+        base_equity = 90
+        derisk_start = int(time_to_goal * 0.6)
 
-    if rp == "conservative":
+    rp = (risk_profile or "").strip().lower()
+    if rp == 'conservative':
         base_equity -= 10
-    elif rp == "aggressive":
+    elif rp == 'aggressive':
         base_equity += 5
 
-    base_equity = max(10, min(90, base_equity))
+    base_equity = min(base_equity, short_goal_equity_cap)
     final_equity = 10
+    derisk_years = time_to_goal - derisk_start
+    equity_step = (base_equity - final_equity) / derisk_years if derisk_years > 0 else 0
 
-    steps = max(1, time_to_goal - 1)
-    step_down = (base_equity - final_equity) / steps
-
-    rows = []
-    for y in range(1, time_to_goal + 1):
-        eq = int(round(base_equity - (y - 1) * step_down))
-        eq = max(0, min(100, eq))
-        de = 100 - eq
-        rows.append({"Year": y, "Equity Allocation (%)": eq, "Debt Allocation (%)": de})
-    return pd.DataFrame(rows).iloc[: time_to_goal].reset_index(drop=True)
-
-def build_portfolio_from_csvs(strategy: str, equity_pct: int) -> pd.DataFrame:
-    """
-    Select *real fund names* from your CSVs.
-    Equity table is chosen by strategy (Active/Passive/Hybrid).
-    Debt uses DURATION_DEBT.
-    Weights are sized to equity_pct / (100 - equity_pct).
-    """
-    # ---- Equity side ----
-    if strategy == "Active" and ACTIVE_EQ is not None and not ACTIVE_EQ.empty:
-        eq_src = ACTIVE_EQ.copy()
-        subcat = "Active"
-    elif strategy == "Passive" and PASSIVE_EQ is not None and not PASSIVE_EQ.empty:
-        eq_src = PASSIVE_EQ.copy()
-        subcat = "Passive"
-    elif HYBRID_EQ is not None and not HYBRID_EQ.empty:
-        eq_src = HYBRID_EQ.copy()
-        subcat = "Hybrid"
-    else:
-        eq_src = None
-        subcat = "Blend"
-
-    if eq_src is not None and not eq_src.empty:
-        eq_pick = _trim_rank_and_scale(eq_src, total_pct=equity_pct, min_pct=10)
-        eq_pick["Category"] = "Equity"
-        eq_pick["Sub-category"] = subcat
-    else:
-        eq_pick = pd.DataFrame([{"Fund":"Equity Allocation (Basket)","Weight (%)":equity_pct,"Category":"Equity","Sub-category":"Blend"}])
-
-    # ---- Debt side ----
-    debt_pct = 100 - equity_pct
-    if debt_pct > 0:
-        if DURATION_DEBT is not None and not DURATION_DEBT.empty:
-            dt_pick = _trim_rank_and_scale(DURATION_DEBT, total_pct=debt_pct, min_pct=10)
-            dt_pick["Category"] = "Debt"
-            dt_pick["Sub-category"] = "Duration"
+    for year in range(1, time_to_goal + 1):
+        if year <= derisk_start:
+            equity = base_equity
         else:
-            dt_pick = pd.DataFrame([{"Fund":"Debt Allocation (Basket)","Weight (%)":debt_pct,"Category":"Debt","Sub-category":"Duration"}])
-        portfolio = pd.concat([eq_pick, dt_pick], ignore_index=True)
+            equity = base_equity - equity_step * (year - derisk_start)
+
+        equity = int(round(max(min(equity, short_goal_equity_cap), 0) / 5) * 5)
+
+        # bucket floors so we never have a non-zero bucket < 10%
+        if 0 < equity < 10:
+            equity = 10
+
+        debt = 100 - equity
+        if 0 < debt < 10:
+            debt = 10
+            equity = 100 - debt
+
+        # The change is on this line:
+        glide_path.append([year, int(equity), int(debt)])
+
+   return pd.DataFrame(glide_path, columns=['Year', 'Equity Allocation (%)', 'Debt Allocation (%)'])
+
+def choose_strategy(time_to_goal, risk_profile, funding_ratio):
+    if time_to_goal <= 3:
+        return "Passive"
+    if funding_ratio >= 1.3:
+        funding_status = 'overfunded'
+    elif funding_ratio < 0.7:
+        funding_status = 'underfunded'
     else:
-        portfolio = eq_pick
+        funding_status = 'balanced'
 
-    # Final tidy/columns
-    portfolio = portfolio[["Fund","Category","Sub-category","Weight (%)"]].copy()
-    # Final rounding hygiene (sum == 100)
-    s = int(portfolio["Weight (%)"].sum())
-    if s != 100:
-        idx = portfolio["Weight (%)"].idxmax()
-        portfolio.at[idx, "Weight (%)"] = int(portfolio.at[idx, "Weight (%)"]) + (100 - s)
-    return portfolio
+    rp = (risk_profile or "").strip().lower()
 
-def run_engine(user_input: PortfolioInput) -> Dict[str, Any]:
-    """
-    Full pipeline: funding -> strategy -> glide -> portfolio -> explainers.
-    """
-    # 1) Funding & Strategy
-    fv, fr = calculate_funding_ratio(user_input.monthly_investment, user_input.target_corpus, user_input.years_to_goal)
-    strategy = choose_strategy(user_input.years_to_goal, user_input.risk_profile, fr)
+    if time_to_goal <= 5:
+        if funding_status == 'overfunded':
+            return "Passive"
+        elif rp == 'aggressive' and funding_status == 'underfunded':
+            return "Hybrid"
+        else:
+            return "Passive"
+    elif 6 <= time_to_goal <= 10:
+        if rp == 'conservative':
+            return "Passive"
+        elif rp == 'moderate':
+            return "Hybrid" if funding_status == 'balanced' else "Passive"
+        elif rp == 'aggressive':
+            return "Active" if funding_status == 'underfunded' else "Hybrid"
+    else:
+        if rp == 'conservative':
+            return "Passive"
+        elif funding_status == 'underfunded':
+            return "Active"
+        elif funding_status == 'overfunded':
+            return "Hybrid" if rp != 'conservative' else "Passive"
+        else:
+            return "Active" if rp == 'aggressive' else "Hybrid"
 
-    # 2) Glide path (DF) capped to N
-    glide_df = generate_step_down_glide_path(user_input.years_to_goal, fr, user_input.risk_profile)
-    glide_records = glide_df.to_dict(orient="records")
+# ---------- Min-10% helpers: trim + enforce ----------
+def trim_funds_to_min(df, total_pct, min_pct=10, sort_col=None):
+    max_funds = max(1, int(total_pct // min_pct))
+    if len(df) > max_funds:
+        if sort_col and sort_col in df.columns:
+            df = df.sort_values(sort_col, ascending=False).head(max_funds)
+        else:
+            df = df.head(max_funds)
+    return df.copy()
 
-    # 3) Portfolio from CSVs using Year-1 equity split
-    y1_equity = int(glide_df.iloc[0]["Equity Allocation (%)"]) if not glide_df.empty else 60
-    portfolio_df = build_portfolio_from_csvs(strategy, y1_equity)
+def enforce_min_allocation(df, total_pct, min_pct=10, step=5):
+    df = df.copy()
+    df['Weight (%)'] = df['Weight (%)'].apply(lambda x: round(x / step) * step)
+    df['Weight (%)'] = df['Weight (%)'].apply(lambda x: max(min_pct, x))
+    s = df['Weight (%)'].sum()
+    if s == 0:
+        raise ValueError("Zero weights after min-enforcement.")
+    df['Weight (%)'] = df['Weight (%)'] / s * total_pct
+    df['Weight (%)'] = df['Weight (%)'].apply(lambda x: round(x / step) * step)
+    diff = total_pct - df['Weight (%)'].sum()
+    if diff != 0:
+        idx = df['Weight (%)'].idxmax()
+        df.at[idx, 'Weight (%)'] += diff
+    return df
 
-    # 4) Explainers (pass proper shapes)
+def standardize_fund_col(df):
+    if 'Fund' in df.columns:
+        return df
+    cand = [c for c in df.columns if 'fund' in c.lower() or 'scheme' in c.lower() or 'name' in c.lower()]
+    if cand:
+        return df.rename(columns={cand[0]: 'Fund'})
+    df = df.copy()
+    df['Fund'] = df.index.astype(str)
+    return df
+
+def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
+    duration_debt_df = duration_debt_df.copy()
+    allowed = ['Liquid'] if time_to_goal > 3 else ['Liquid', 'Ultra Short']
+    debt_filtered = duration_debt_df[duration_debt_df['Sub-category'].str.strip().isin(allowed)].copy()
+    if debt_filtered.empty:
+        raise ValueError("⚠️ No suitable debt funds found for the selected duration.")
+    debt_filtered = standardize_fund_col(debt_filtered)
+    debt_filtered['Category'] = 'Debt'
+    debt_filtered = trim_funds_to_min(
+        debt_filtered, debt_pct, min_pct=10,
+        sort_col='Weight' if 'Weight' in debt_filtered.columns else None
+    )
+    debt_filtered['Weight (%)'] = debt_pct / len(debt_filtered)
+    return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
+
+
+# ================= API Endpoint =================
+@app.post("/generate_portfolio/")
+def generate_portfolio(user_input: PortfolioInput):
     try:
-        glide_block = explain_glide_story({
+        # normalize risk profile once
+        risk = (user_input.risk_profile or "").strip().lower()
+
+        # 1) Funding + Strategy + Glide
+        fv, funding_ratio = calculate_funding_ratio(
+            user_input.monthly_investment,
+            user_input.target_corpus,
+            user_input.years_to_goal
+        )
+        strategy = choose_strategy(user_input.years_to_goal, risk, funding_ratio)
+        glide_path = generate_step_down_glide_path(
+            user_input.years_to_goal, funding_ratio, risk
+        )
+
+        # Use Year-1 buckets for construction
+        glide_equity_pct = int(glide_path.iloc[0]['Equity Allocation (%)'])
+        if 0 < glide_equity_pct < 10:
+            glide_equity_pct = 10
+        glide_debt_pct = 100 - glide_equity_pct
+        if 0 < glide_debt_pct < 10:
+            glide_debt_pct = 10
+            glide_equity_pct = 100 - glide_debt_pct
+
+        # 2) Equity selection (by chosen strategy)
+        if strategy == "Active":
+            eq_df = active_eq.copy()
+            eq_df['Sub-category'] = 'Active'
+        elif strategy == "Passive":
+            eq_df = passive_eq.copy()
+            eq_df['Sub-category'] = 'Passive'
+        elif strategy == "Hybrid":
+            eq_df = hybrid_eq.copy()
+            eq_df = eq_df.rename(columns={'Type': 'Sub-category'})
+        else:
+            raise ValueError("Invalid strategy")
+
+        eq_df = standardize_fund_col(eq_df)
+        eq_df['Category'] = 'Equity'
+        if 'Weight' not in eq_df.columns:
+            eq_df['Weight'] = 1.0
+
+        eq_df = trim_funds_to_min(eq_df, glide_equity_pct, min_pct=10, sort_col='Weight')
+        eq_df['Weight'] = eq_df['Weight'] / eq_df['Weight'].sum()
+        eq_df['Weight (%)'] = eq_df['Weight'] * glide_equity_pct
+        eq_df = enforce_min_allocation(
+            eq_df[['Fund', 'Category', 'Sub-category', 'Weight (%)']],
+            glide_equity_pct, min_pct=10, step=5
+        )
+
+        # 3) Debt selection
+        selected_debt = get_debt_allocation(duration_debt, user_input.years_to_goal, glide_debt_pct)
+        selected_debt = enforce_min_allocation(selected_debt, glide_debt_pct, min_pct=10, step=5)
+
+        # 4) Combine & final enforcement for whole portfolio
+        combined = pd.concat([
+            eq_df[['Fund', 'Category', 'Sub-category', 'Weight (%)']],
+            selected_debt[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
+        ], ignore_index=True)
+        final_portfolio = enforce_min_allocation(combined, 100, min_pct=10, step=5)
+
+        # Safety checks
+        if (final_portfolio['Weight (%)'] < 10).any():
+            raise ValueError("Found a fund below 10% after enforcement.")
+        if final_portfolio['Weight (%)'].sum() != 100:
+            raise ValueError("Final portfolio does not sum to 100%.")
+
+        # ---------- EXPLAINER BLOCKS: Call with CORRECT signatures ----------
+
+        # Glide explainer call (requires a single dictionary)
+        glide_context = {
             "years_to_goal": user_input.years_to_goal,
             "risk_profile": user_input.risk_profile,
-            "funding_ratio": float(fr),
-            "glide_path": glide_records,
-        })
-    except Exception as e:
-        glide_block = {"story": f"(glide explainer unavailable) {e}"}
+            "funding_ratio": float(funding_ratio),
+            "glide_path": glide_path.to_dict(orient="records")
+        }
+        glide_block = explain_glide_story(glide_context)
 
-    try:
-        strategy_block = explain_strategy_story({
+        # Strategy explainer call (requires a single dictionary)
+        strategy_context = {
             "strategy": strategy,
             "years_to_goal": user_input.years_to_goal,
             "risk_profile": user_input.risk_profile,
-            "funding_ratio": float(fr),
-        })
-    except Exception as e:
-        strategy_block = {"story": f"(strategy explainer unavailable) {e}"}
+            "funding_ratio": float(funding_ratio)
+        }
+        strategy_block = explain_strategy_story(strategy_context)
 
-    try:
-        portfolio_block = explain_portfolio_story(portfolio_df)
-    except Exception as e:
-        portfolio_block = {"story": f"(portfolio explainer unavailable) {e}"}
+        # Portfolio explainer call (requires a single DataFrame)
+        portfolio_block = explain_portfolio_story(final_portfolio)
 
-    return {
-        "strategy": strategy,
-        "funding_ratio": float(fr),  # keep full precision internally; round on write/output
-        "glide_path": glide_records,                                  # list[dict]
-        "portfolio": portfolio_df.to_dict(orient="records"),          # list[dict]
-        "glide_explainer": glide_block,
-        "strategy_explainer": strategy_block,
-        "portfolio_explainer": portfolio_block,
-    }
 
-# =================== Public endpoints ===================
+        # ---------- RESPONSE ----------
+        return {
+            # Raw engine outputs (backward-compatible)
+            "strategy": strategy,
+            "funding_ratio": round(float(funding_ratio), 4),
+            "glide_path": glide_path.to_dict(orient="records"),
+            "portfolio": final_portfolio.to_dict(orient="records"),
 
-class GenerateRequest(BaseModel):
-    monthly_investment: float
-    target_corpus: float
-    years_to_goal: int
-    risk_profile: str
+            # Explainer blocks
+            "glide_explainer": glide_block,
+            "strategy_explainer": strategy_block,
+            "portfolio_explainer": portfolio_block,
+        }
 
-@app.post("/generate_portfolio/")
-def generate_portfolio(user_input: GenerateRequest):
-    try:
-        ui = PortfolioInput(
-            monthly_investment=user_input.monthly_investment,
-            target_corpus=user_input.target_corpus,
-            years_to_goal=int(user_input.years_to_goal),
-            risk_profile=user_input.risk_profile,
-        )
-        output = run_engine(ui)
-        # Cap glide to N (safety)
-        output["glide_path"] = output["glide_path"][: ui.years_to_goal]
-        # Round funding ratio for API consumers too
-        output["funding_ratio"] = round(float(output["funding_ratio"]), 2)
-        return output
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# =================== Airtable integration ===================
 
+# === Pydantic model for the incoming webhook payload ===
 class AirtableWebhookPayload(BaseModel):
     record_id: str
 
-AIRTABLE_API_KEY   = os.environ.get("AIRTABLE_API_KEY")
-AIRTABLE_BASE_ID   = os.environ.get("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME= "Investor_inputs"
+# Define the Airtable variables
+AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
+AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = "Investor_inputs"
 
-_api      = Api(AIRTABLE_API_KEY)
-_airtable = _api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+# New initialization for the Airtable object
+api = Api(AIRTABLE_API_KEY)
+airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
 @app.post("/trigger_processing/")
-async def trigger_processing(payload: AirtableWebhookPayload, authorization: Optional[str] = Header(None)):
-    """
-    Called by Airtable Automation with { record_id }.
-    Reads inputs from the record, runs engine, writes outputs back to the same record.
-    """
+async def trigger_processing(payload: AirtableWebhookPayload):
     try:
-        rec_id = payload.record_id
-        rec = _airtable.get(rec_id)
-        fields = rec.get("fields", {})
+        record_id = payload.record_id
+        
+        # 1. Fetch the data from Airtable using the record_id
+        record = airtable.get(record_id)
+        inputs = record.get('fields', {})
 
-        # ---- Read EXACT Airtable fields you provided ----
-        monthly_raw = fields.get("Monthly Investments")   # ✅ exact
-        target_raw  = fields.get("Target Corpus")         # ✅ exact
-        years_raw   = fields.get("Time to goal")          # ✅ exact (duration years)
-        risk_raw    = fields.get("Risk Preference")       # ✅ exact
-
-        if monthly_raw is None or target_raw is None or years_raw is None:
-            raise HTTPException(
-                status_code=422,
-                detail="Missing required fields: 'Monthly Investments', 'Target Corpus', or 'Time to goal'."
-            )
-
-        monthly = _req_float("Monthly Investments", monthly_raw)
-        target  = _req_float("Target Corpus", target_raw)
-        years   = int(_req_int("Time to goal", years_raw))  # already a duration
-        risk    = (risk_raw or "Moderate")
-
-        user_input = PortfolioInput(
-            monthly_investment=monthly,
-            target_corpus=target,
-            years_to_goal=years,
-            risk_profile=risk
-        )
-
-        processed = run_engine(user_input)
-
-        # ✅ Enforce exact N-year glide and compact
-        N = years
-        glide_verbose = processed["glide_path"][:N]
-        compact_glide = compact_glide_verbose_to_array(glide_verbose)
-        glide_json = minified_json(compact_glide)
-
-        # ✅ Portfolio JSON (actual fund names)
-        portfolio_json = minified_json(processed["portfolio"])
-
-        # ✅ Round funding ratio to 2 decimals on write
-        fr_2dp = round(float(processed["funding_ratio"]), 2)
-
-        update_fields = {
-            "glide_path":                 safe_store(glide_json),
-            "portfolio":                  safe_store(portfolio_json),
-            "glide_explainer_story":      processed["glide_explainer"]["story"],
-            "strategy_explainer_story":   processed["strategy_explainer"]["story"],
-            "portfolio_explainer_story":  processed["portfolio_explainer"]["story"],
-            "funding_ratio":              fr_2dp,
-            "strategy":                   processed["strategy"],
+        # Map Airtable fields to the PortfolioInput pydantic model
+        user_input_data = {
+            "monthly_investment": inputs.get("Monthly Investments"),
+            "target_corpus": inputs.get("Target Corpus"),
+            "years_to_goal": inputs.get("Time Horizon (years)"),
+            "risk_profile": inputs.get("Risk Preference")
         }
-        _airtable.update(rec_id, fields=update_fields)
+        
+        # 2. Call the existing portfolio generation engine
+        try:
+            processed_output = generate_portfolio(PortfolioInput(**user_input_data))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Engine error: {e}")
 
-        return {"status": "success", "record_id": rec_id}
-    except HTTPException:
-        raise
+        # 3. Write the output back to Airtable against the same record_id
+        update_data = {
+            "strategy": processed_output["strategy"],
+            "funding_ratio": processed_output["funding_ratio"],
+            "glide_path": json.dumps(processed_output["glide_path"]),
+            "portfolio": json.dumps(processed_output["portfolio"]),
+            "glide_explainer_story": processed_output["glide_explainer"]["story"],
+            "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
+            "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
+        }
+        
+        airtable.update(record_id, fields=update_data)
+
+        return {"status": "success", "record_id": record_id}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process: {e}")
+
 
 @app.get("/health")
 def health():
     return {"ok": True, "build": __API_BUILD__}
 
-# ============= Local dev entrypoint (optional) =============
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", "8000"))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
