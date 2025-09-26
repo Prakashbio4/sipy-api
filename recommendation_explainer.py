@@ -1,7 +1,6 @@
 # recommendation_explainer.py
 # Generates a short, layman-friendly 4-part explainer and provides Airtable helpers.
-
-from typing import Dict, Any
+from typing import Dict, Any, List
 import json
 import re
 
@@ -62,14 +61,25 @@ def parse_glide_path(value):
     Parse 'glide_path' into:
       - equity_start_pct
       - equity_end_pct (optional)
-    Accepts dicts or JSON strings like:
-      {"equity_start_pct":80, "equity_end_pct":10}
-    Falls back to extracting numbers from free text.
+
+    Accepts:
+      - dict: {"equity_start_pct":80, "equity_end_pct":10}
+      - list[dict]: first item may have "Equity Allocation (%)"
+      - JSON string of either form
+      - string like "{1, 80, 20}, {2, 80, 20}, ..."  -> picks first tuple's middle number (80)
     """
     out = {}
     if isinstance(value, dict):
         out["equity_start_pct"] = _coerce_pct(value.get("equity_start_pct"))
         out["equity_end_pct"]   = _coerce_pct(value.get("equity_end_pct"))
+        return out
+
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, dict):
+            start = first.get("Equity Allocation (%)")
+            if start is not None:
+                out["equity_start_pct"] = _coerce_pct(start)
         return out
 
     if isinstance(value, str):
@@ -81,10 +91,23 @@ def parse_glide_path(value):
                 out["equity_start_pct"] = _coerce_pct(obj.get("equity_start_pct"))
                 out["equity_end_pct"]   = _coerce_pct(obj.get("equity_end_pct"))
                 return out
+            if isinstance(obj, list) and obj:
+                first = obj[0]
+                if isinstance(first, dict):
+                    start = first.get("Equity Allocation (%)")
+                    if start is not None:
+                        out["equity_start_pct"] = _coerce_pct(start)
+                        return out
         except Exception:
             pass
 
-        # Keyed extraction
+        # Pattern like "{1, 80, 20}, {2, 80, 20}, ..."
+        m = re.search(r"\{\s*\d+\s*,\s*(\d+)\s*,\s*\d+\s*\}", s)
+        if m:
+            out["equity_start_pct"] = _coerce_pct(m.group(1))
+            return out
+
+        # Keyed fallback
         start = _parse_percent_from_text(s, ["start", "equity_start", "year 1", "y1", "equity"])
         end   = _parse_percent_from_text(s, ["end", "equity_end", "near goal", "final"])
         out["equity_start_pct"] = start
@@ -101,45 +124,94 @@ def parse_glide_path(value):
 
     return out
 
+def _bucket_from_fund_name(name: str) -> str:
+    n = (name or "").lower()
+    if "smallcap" in n:
+        return "small"
+    if "midcap" in n:
+        return "mid"
+    if "nifty 50" in n or "nifty50" in n or "next 50" in n or "nifty next 50" in n or "bluechip" in n or "large" in n:
+        return "large"
+    return "other"
+
 def parse_portfolio(value):
     """
-    Parse 'portfolio' into:
+    Parse 'portfolio' into aggregate buckets:
       - large_cap_pct
       - mid_cap_pct
+      - small_cap_pct (optional)
       - debt_pct (optional)
-    Accepts dicts or JSON strings like:
-      {"large_cap_pct":35,"mid_cap_pct":25,"debt_pct":40}
-    Also accepts free text e.g. "large:35%, mid:25, debt:40%".
+
+    Accepts:
+      - dict (simple %s)
+      - JSON string of dict or list[dict]
+      - list[dict] like your input with keys: Fund, Category, Sub-category, Weight (%)
     """
     out = {}
+    # Direct dict
     if isinstance(value, dict):
         out["large_cap_pct"] = _coerce_pct(value.get("large_cap_pct"))
         out["mid_cap_pct"]   = _coerce_pct(value.get("mid_cap_pct"))
+        out["small_cap_pct"] = _coerce_pct(value.get("small_cap_pct"))
         out["debt_pct"]      = _coerce_pct(value.get("debt_pct"))
         return out
 
+    # List of funds
+    def _agg_from_list(lst: List[dict]):
+        large = mid = small = debt = other = 0
+        for row in lst:
+            try:
+                w = float(row.get("Weight (%)", 0))
+            except Exception:
+                w = 0
+            cat = (row.get("Category") or "").lower()
+            fund = row.get("Fund") or ""
+
+            if "debt" in cat or "liquid" in (row.get("Sub-category") or "").lower():
+                debt += w
+            elif "equity" in cat:
+                b = _bucket_from_fund_name(fund)
+                if b == "large": large += w
+                elif b == "mid": mid += w
+                elif b == "small": small += w
+                else: other += w
+        # Normalize if total != 100
+        total = large + mid + small + debt + other
+        if total > 0:
+            scale = 100.0 / total
+            large, mid, small, debt, other = [round(x * scale) for x in (large, mid, small, debt, other)]
+        return {
+            "large_cap_pct": _coerce_pct(large),
+            "mid_cap_pct": _coerce_pct(mid),
+            "small_cap_pct": _coerce_pct(small),
+            "debt_pct": _coerce_pct(debt),
+        }
+
+    if isinstance(value, list):
+        return _agg_from_list(value)
+
+    # JSON string
     if isinstance(value, str):
         s = value.strip()
-        # Try JSON
         try:
             obj = json.loads(s)
             if isinstance(obj, dict):
-                out["large_cap_pct"] = _coerce_pct(obj.get("large_cap_pct"))
-                out["mid_cap_pct"]   = _coerce_pct(obj.get("mid_cap_pct"))
-                out["debt_pct"]      = _coerce_pct(obj.get("debt_pct"))
-                return out
+                return {
+                    "large_cap_pct": _coerce_pct(obj.get("large_cap_pct")),
+                    "mid_cap_pct": _coerce_pct(obj.get("mid_cap_pct")),
+                    "small_cap_pct": _coerce_pct(obj.get("small_cap_pct")),
+                    "debt_pct": _coerce_pct(obj.get("debt_pct")),
+                }
+            if isinstance(obj, list):
+                return _agg_from_list(obj)
         except Exception:
             pass
 
-        # Keyed extraction
+        # Keyed extraction (fallback)
         large = _parse_percent_from_text(s, ["large", "large cap", "lcap"])
         mid   = _parse_percent_from_text(s, ["mid", "mid cap", "mcap"])
         debt  = _parse_percent_from_text(s, ["debt", "bonds", "fixed"])
-        out["large_cap_pct"] = large
-        out["mid_cap_pct"]   = mid
-        out["debt_pct"]      = debt
-        if any(v is not None for v in out.values()):
-            return out
+        return {"large_cap_pct": _coerce_pct(large), "mid_cap_pct": _coerce_pct(mid), "debt_pct": _coerce_pct(debt)}
 
     return out
 
@@ -148,12 +220,6 @@ def parse_portfolio(value):
 def airtable_record_to_ctx(record: dict) -> dict:
     """
     Map Investor_Inputs fields to the context expected by the story builders.
-      - "User Name"        -> name
-      - "Target Corpus"    -> target_corpus
-      - "funding_ratio"    -> funding_ratio_pct  (percent center or decimal)
-      - "strategy"         -> strategy
-      - "glide_path"       -> parsed equity_start_pct / equity_end_pct
-      - "portfolio"        -> parsed large/mid/debt
     """
     f = record.get("fields", record)
 
@@ -170,6 +236,8 @@ def airtable_record_to_ctx(record: dict) -> dict:
         fr_center_pct = 0.0
 
     strategy = f.get("strategy")
+    risk_profile = f.get("Risk Preference") or f.get("risk_preference")
+
     glide = parse_glide_path(f.get("glide_path"))
     port  = parse_portfolio(f.get("portfolio"))
 
@@ -178,23 +246,42 @@ def airtable_record_to_ctx(record: dict) -> dict:
         "target_corpus": target,
         "funding_ratio_pct": fr_center_pct,
         "strategy": strategy,
+        "risk_profile": risk_profile,
         "equity_start_pct": glide.get("equity_start_pct"),
         "equity_end_pct": glide.get("equity_end_pct"),
         "large_cap_pct": port.get("large_cap_pct"),
         "mid_cap_pct": port.get("mid_cap_pct"),
+        "small_cap_pct": port.get("small_cap_pct"),
         "debt_pct": port.get("debt_pct"),
     }
     return ctx
 
 # ---------------- Story builders ----------------
 
+def _strategy_sentence(strategy: str, risk_profile: str | None) -> str:
+    s = (strategy or "").strip().title() or "Active"
+    rp = (risk_profile or "").strip().lower()
+    if s == "Passive":
+        if rp.startswith("conserv"):
+            return ("Given your conservative preference, we recommend a Passive strategy — "
+                    "low-cost index funds that mirror the market. It keeps costs low and reduces surprises "
+                    "while you stay invested for growth.")
+        return ("We recommend a Passive strategy — low-cost index funds that mirror the market, "
+                "keeping things simple and cost-efficient while you stay invested.")
+    if s == "Hybrid":
+        return ("To balance growth and steadiness, we recommend a Hybrid strategy — "
+                "a mix of index funds and focused active ideas.")
+    # Active
+    if rp.startswith("conserv"):
+        # edge case: conservative + active (rare)
+        return ("We recommend an Active strategy with care — expert-managed funds aiming to add value, "
+                "used thoughtfully given your conservative preference.")
+    return ("To help close the gap faster (with more ups and downs), we recommend an Active strategy — "
+            "expert-managed funds that aim to add value over the market.")
+
 def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     """
-    Returns story split into 4 variables:
-      var1: Gap + market-range context (10–15% hardcoded)
-      var2: Strategy sentence (Active/Passive/Hybrid, layman)
-      var3: Year-1 allocation + shift-to-safety; omits split if large/mid not provided
-      var4: Strong close + rebalance nudge
+    Returns story split into 4 variables.
     """
     name        = (ctx.get("name") or "Investor").strip()
     target_str  = _money(ctx.get("target_corpus"))
@@ -202,17 +289,15 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     fr_display  = _range_plus_minus_5(fr_center)
 
     strategy    = (ctx.get("strategy") or "").strip().title() or "Active"
-    if strategy == "Passive":
-        strat_line = "Passive strategy — low-cost index funds that mirror the market."
-    elif strategy == "Hybrid":
-        strat_line = "Hybrid strategy — a balanced mix of index funds and select active funds."
-    else:
-        strat_line = "Active strategy — carefully managed funds that aim to deliver better than the market."
+    risk_prof   = (ctx.get("risk_profile") or "").strip()
 
     eq_start    = _pct(ctx.get("equity_start_pct"))
     large       = _pct(ctx.get("large_cap_pct"))
     mid         = _pct(ctx.get("mid_cap_pct"))
-    debt        = _pct(ctx.get("debt_pct") if ctx.get("debt_pct") is not None else (100 - large - mid))
+    small       = _pct(ctx.get("small_cap_pct"))
+    # Debt: if not provided, deduce from remaining
+    provided_sum = sum(v for v in [large, mid, small] if v)
+    debt        = _pct(ctx.get("debt_pct") if ctx.get("debt_pct") is not None else (100 - provided_sum))
 
     var1 = (
         f"Hi {name}, here’s where you stand. If you continue as you are, "
@@ -222,14 +307,19 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
         "That’s what we use to calculate your funding gap."
     )
 
-    var2 = f"To bridge it, we recommend an {strat_line}"
+    # Strategy sentence tailored to risk profile and choice
+    var2 = _strategy_sentence(strategy, risk_prof)
 
-    # If large/mid missing, keep it graceful.
-    if (large > 0 or mid > 0):
+    # Allocation sentence (include small if present)
+    if large > 0 or mid > 0 or small > 0:
+        parts = []
+        if large > 0: parts.append(f"{large}% in large companies for stability")
+        if mid > 0:   parts.append(f"{mid}% in mid-sized companies for growth")
+        if small > 0: parts.append(f"{small}% in smaller companies for extra growth potential")
+        split_sentence = "; ".join(parts)
         var3 = (
-            f"In Year 1, your money starts with {eq_start}% in equities — split into "
-            f"{large}% in large companies for stability and {mid}% in mid-sized companies for growth. "
-            f"The rest is in debt for balance, and over time more will shift into debt to protect your savings."
+            f"In Year 1, your money starts with {eq_start}% in equities — split into {split_sentence}. "
+            f"The rest is in debt ({debt}%) for balance, and over time more will shift into debt to protect your savings."
         )
     else:
         var3 = (
@@ -258,20 +348,29 @@ def build_airtable_fields_for_story(ctx: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def build_recommendation_story(ctx: Dict[str, Any]) -> str:
-    """Optional: full story in one string (if you need it anywhere)."""
+    """Optional: full story in one string."""
     parts = build_recommendation_parts(ctx)
     return "\n\n".join([parts["var1"], parts["var2"], parts["var3"], parts["var4"]])
 
-# ---------------- Demo (optional) ----------------
+# ---------------- Demo ----------------
 if __name__ == "__main__":
-    demo_ctx = {
-        "name": "Ramesh",
-        "target_corpus": 2000000,   # ₹20 lakhs
-        "funding_ratio_pct": 35,    # shows as 30–40%
-        "strategy": "Active",
+    # Quick demo with your sample portfolio & conservative risk
+    sample_portfolio = [
+        {"Fund":"Motilal Oswal Nifty Midcap 150 Index Fund(G)-Direct Plan","Category":"Equity","Sub-category":"Passive","Weight (%)":30},
+        {"Fund":"UTI Nifty 50 Index Fund(G)-Direct Plan","Category":"Equity","Sub-category":"Passive","Weight (%)":25},
+        {"Fund":"Nippon India Nifty Smallcap 250 Index Fund(G)-Direct Plan","Category":"Equity","Sub-category":"Passive","Weight (%)":15},
+        {"Fund":"ICICI Pru Nifty Next 50 Index Fund(G)-Direct Plan","Category":"Equity","Sub-category":"Passive","Weight (%)":10},
+        {"Fund":"ICICI Pru Liquid Fund(G)-Direct Plan","Category":"Debt","Sub-category":"Liquid","Weight (%)":20},
+    ]
+    ctx = {
+        "name": "GANESH KUMAR R",
+        "target_corpus": 5e7,  # ₹5 Cr
+        "funding_ratio_pct": 21,  # shows as 16–26%
+        "strategy": "Passive",
+        "risk_profile": "Conservative",
         "equity_start_pct": 80,
-        "large_cap_pct": 35,
-        "mid_cap_pct": 25,
-        # debt omitted -> computed as remainder (40)
+        # derive large/mid/small/debt from the list
+        "portfolio": sample_portfolio,
+        **parse_portfolio(sample_portfolio),
     }
-    print(build_recommendation_story(demo_ctx))
+    print(build_recommendation_story(ctx))

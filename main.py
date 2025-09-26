@@ -1,6 +1,5 @@
 import os
 import json
-import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,6 +8,7 @@ from pyairtable import Api
 from recommendation_explainer import (
     build_airtable_fields_for_story,
     parse_portfolio,
+    parse_glide_path,
 )
 
 app = FastAPI()
@@ -21,7 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------- Existing models (unchanged) -----------
+# ----------- Existing models -----------
 
 class PortfolioInput(BaseModel):
     name: str
@@ -43,7 +43,6 @@ async def trigger_processing(request: Request):
         api_key = os.getenv("AIRTABLE_API_KEY")
         base_id = os.getenv("AIRTABLE_BASE_ID")
         table_name = os.getenv("AIRTABLE_TABLE_NAME", "Investor_Inputs")
-
         if not api_key or not base_id:
             raise HTTPException(status_code=500, detail="Missing Airtable credentials")
 
@@ -60,7 +59,6 @@ async def trigger_processing(request: Request):
             "target_corpus": inputs.get("Target Corpus"),
             "current_corpus": inputs.get("Current Corpus"),
         }
-
         from orchestrator import generate_portfolio
         processed_output = generate_portfolio(PortfolioInput(**user_input_data))
 
@@ -68,35 +66,57 @@ async def trigger_processing(request: Request):
         user_name = inputs.get("User Name") or inputs.get("Name") or "Investor"
         target_corpus = inputs.get("Target Corpus")
 
+        # funding_ratio may be decimal (0.xx) — convert to percent
         try:
-            fr_center_pct = float(processed_output.get("funding_ratio", 0)) * 100.0
+            fr_center_pct = float(processed_output.get("funding_ratio", 0))
+            if fr_center_pct <= 1.0:
+                fr_center_pct *= 100.0
         except Exception:
             fr_center_pct = 0.0
 
+        # Year 1 equity: try engine → fallback to parsing Glide Path field → fallback to portfolio equity sum
         equity_start_pct = 0
         try:
             first_year = processed_output.get("glide_path", [])[0]
             equity_start_pct = int(first_year.get("Equity Allocation (%)", 0))
         except Exception:
             pass
+        if equity_start_pct == 0:
+            gp_parsed = parse_glide_path(inputs.get("glide_path"))
+            equity_start_pct = int(gp_parsed.get("equity_start_pct") or 0)
+        if equity_start_pct == 0:
+            # derive from portfolio if it’s a list of funds (equity weights sum)
+            try:
+                portfolio_list = inputs.get("portfolio")
+                if isinstance(portfolio_list, str):
+                    portfolio_list = json.loads(portfolio_list)
+                if isinstance(portfolio_list, list):
+                    eq = sum(float(r.get("Weight (%)", 0)) for r in portfolio_list if (r.get("Category") or "").lower() == "equity")
+                    equity_start_pct = int(round(eq))
+            except Exception:
+                pass
 
+        # Parse Large/Mid/Small/Debt from Airtable 'portfolio' (list or json)
         portfolio_raw = inputs.get("portfolio")
         try:
             parsed_port = parse_portfolio(portfolio_raw)
         except Exception:
             parsed_port = {}
         large_cap_pct = parsed_port.get("large_cap_pct")
-        mid_cap_pct = parsed_port.get("mid_cap_pct")
-        debt_pct = parsed_port.get("debt_pct")
+        mid_cap_pct   = parsed_port.get("mid_cap_pct")
+        small_cap_pct = parsed_port.get("small_cap_pct")
+        debt_pct      = parsed_port.get("debt_pct")
 
         ctx_for_story = {
             "name": user_name,
             "target_corpus": target_corpus,
             "funding_ratio_pct": fr_center_pct,
             "strategy": processed_output.get("strategy"),
+            "risk_profile": inputs.get("Risk Preference"),
             "equity_start_pct": equity_start_pct,
             "large_cap_pct": large_cap_pct,
             "mid_cap_pct": mid_cap_pct,
+            "small_cap_pct": small_cap_pct,
             "debt_pct": debt_pct,
         }
         explainer_fields = build_airtable_fields_for_story(ctx_for_story)
@@ -121,7 +141,6 @@ async def trigger_processing(request: Request):
         }
 
         table.update(record_id, update_data)
-
         return {"status": "success", "record_id": record_id, "updated_fields": list(update_data.keys())}
 
     except HTTPException:
@@ -160,33 +179,25 @@ def generate_explainer_only(record_id: str):
         except Exception:
             fr_center_pct = 0.0
 
-        equity_start_pct = 0
-        glide_raw = inputs.get("glide_path")
-        if isinstance(glide_raw, dict):
-            equity_start_pct = int(glide_raw.get("equity_start_pct", 0) or 0)
-        elif isinstance(glide_raw, str):
-            try:
-                gp_obj = json.loads(glide_raw)
-                if isinstance(gp_obj, dict):
-                    equity_start_pct = int(gp_obj.get("equity_start_pct", 0) or 0)
-                elif isinstance(gp_obj, list) and gp_obj:
-                    equity_start_pct = int(gp_obj[0].get("Equity Allocation (%)", 0) or 0)
-            except Exception:
-                pass
+        gp_parsed = parse_glide_path(inputs.get("glide_path"))
+        equity_start_pct = int(gp_parsed.get("equity_start_pct") or 0)
 
         parsed_port = parse_portfolio(inputs.get("portfolio"))
         large_cap_pct = parsed_port.get("large_cap_pct")
-        mid_cap_pct = parsed_port.get("mid_cap_pct")
-        debt_pct = parsed_port.get("debt_pct")
+        mid_cap_pct   = parsed_port.get("mid_cap_pct")
+        small_cap_pct = parsed_port.get("small_cap_pct")
+        debt_pct      = parsed_port.get("debt_pct")
 
         ctx_for_story = {
             "name": user_name,
             "target_corpus": target_corpus,
             "funding_ratio_pct": fr_center_pct,
             "strategy": inputs.get("strategy"),
+            "risk_profile": inputs.get("Risk Preference"),
             "equity_start_pct": equity_start_pct,
             "large_cap_pct": large_cap_pct,
             "mid_cap_pct": mid_cap_pct,
+            "small_cap_pct": small_cap_pct,
             "debt_pct": debt_pct,
         }
 
