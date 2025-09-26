@@ -4,6 +4,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pyairtable import Api
+from typing import Optional, Dict, Any
+
+
+class TriggerPayload(BaseModel):
+    record_id: str
 
 from recommendation_explainer import (
     build_airtable_fields_for_story,
@@ -33,10 +38,9 @@ class PortfolioInput(BaseModel):
 # ----------- Existing endpoint: trigger_processing -----------
 
 @app.post("/trigger_processing/")
-async def trigger_processing(request: Request):
+async def trigger_processing(payload: TriggerPayload):
     try:
-        data = await request.json()
-        record_id = data.get("record_id")
+        record_id = payload.record_id
         if not record_id:
             raise HTTPException(status_code=400, detail="record_id is required")
 
@@ -50,6 +54,7 @@ async def trigger_processing(request: Request):
         table = api.table(base_id, table_name)
         record = table.get(record_id)
         inputs = record.get("fields", {})
+
 
         # ----------------- Existing portfolio generation -----------------
         user_input_data = {
