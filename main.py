@@ -511,7 +511,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         # 3. Write the output back to Airtable against the same record_id
         update_data = {
             "strategy": processed_output["strategy"],
-            "funding_ratio": processed_output["funding_ratio"],
+            "funding_ratio": round(float(processed_output["funding_ratio"]), 2),
             "glide_path": formatted_glide_path,  # << formatted string
             "portfolio": json.dumps(processed_output["portfolio"]),
             "glide_explainer_story": processed_output["glide_explainer"]["story"],
