@@ -8,6 +8,19 @@ import numpy as np
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from pyairtable import Api
+import re 
+
+# ✅ Add helper here
+def _to_years_from_any(x, default=0):
+    """Parse an integer year-count from messy strings like 'in 15 years', '54 (user is currently 37)', or 15."""
+    if x is None:
+        return default
+    if isinstance(x, int):
+        return x
+    s = str(x)
+    nums = re.findall(r"\d+", s)
+    return int(nums[0]) if nums else default
+
 
 # === Explainers (stories layer) — existing ===
 from glide_explainer import explain_glide_story
@@ -462,7 +475,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         user_input_data = {
             "monthly_investment": inputs.get("Monthly Investments"),
             "target_corpus": inputs.get("Target Corpus"),
-            "years_to_goal": inputs.get("Time Horizon (years)"),
+            "years_to_goal": _to_years_from_any(inputs.get("Time to goal")),
             "risk_profile": inputs.get("Risk Preference")
         }
 
