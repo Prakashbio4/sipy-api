@@ -260,14 +260,21 @@ def _strategy_sentence(strategy: str, risk_profile: Optional[str]) -> str:
     return ("To help close the gap faster (with more ups and downs), we recommend an Active strategy — "
             "expert-managed funds that aim to add value over the market.")
 
-def generate_four_part_explainer(name: str, target_corpus: Any, funding_ratio_pct_center: float,
-                                 strategy: str, risk_profile: Optional[str],
-                                 year1_equity_pct: int, portfolio_rows: List[Dict[str, Any]]) -> Dict[str, str]:
+def generate_four_part_explainer(
+    name: str,
+    target_corpus: Any,
+    funding_ratio_pct_center: float,
+    strategy: str,
+    risk_profile: Optional[str],
+    year1_equity_pct: int,
+    portfolio_rows: List[Dict[str, Any]],
+    years_to_goal: int,   # ✅ new param
+) -> Dict[str, str]:
+    """Return {'explainer 1'..'explainer 4'} with adaptive story for short horizons."""
     target_str = _money(target_corpus)
     fr_display = _range_pm5(funding_ratio_pct_center)
-    buckets = aggregate_portfolio_buckets(portfolio_rows)
-    large, mid, small, debt = buckets.get("large_cap_pct", 0), buckets.get("mid_cap_pct", 0), buckets.get("small_cap_pct", 0), buckets.get("debt_pct", 0)
 
+    # Part 1 — funding gap + context
     var1 = (
         f"Hi {name}, here’s where you stand. If you continue as you are, "
         f"you’ll likely reach only {fr_display} of your goal of {target_str}.\n\n"
@@ -275,21 +282,56 @@ def generate_four_part_explainer(name: str, target_corpus: Any, funding_ratio_pc
         "Over the past 5 years, equities have averaged between 10–15% per year. "
         "That’s what we use to calculate your funding gap."
     )
-    var2 = _strategy_sentence(strategy, risk_profile)
 
-    parts = []
-    if large > 0: parts.append(f"{large}% in large companies for stability")
-    if mid   > 0: parts.append(f"{mid}% in mid-sized companies for growth")
-    if small > 0: parts.append(f"{small}% in smaller companies for extra growth potential")
-    split_sentence = "; ".join(parts) if parts else "equities"
-    var3 = (
-        f"In Year 1, your money starts with {year1_equity_pct}% in equities — split into {split_sentence}. "
-        f"The rest is in debt ({debt}%) for balance, and over time more will shift into debt to protect your savings."
+    # Short-horizon mode (≤3 years): capital protection first
+    if years_to_goal <= 3:
+        debt_pct = max(0, 100 - int(year1_equity_pct))
+        var2 = (
+            "With your goal so close, protecting your savings matters more than chasing returns. "
+            "We recommend a conservative, capital-first approach — mostly debt, with a small equity slice for gentle growth."
+        )
+        # Keep it simple; don’t talk about large/mid cap splits in tiny equity allocations
+        var3 = (
+            f"In Year 1, your money starts with {int(year1_equity_pct)}% in equities and {debt_pct}% in debt. "
+            "This mix is designed to keep your corpus safe while still giving it a small boost before your goal."
+        )
+
+    else:
+        # Standard story for >3 years (use actual portfolio buckets)
+        buckets = aggregate_portfolio_buckets(portfolio_rows)
+        large = buckets.get("large_cap_pct", 0)
+        mid   = buckets.get("mid_cap_pct", 0)
+        small = buckets.get("small_cap_pct", 0)
+        debt  = buckets.get("debt_pct", 0)
+
+        # Strategy line tuned by chosen strategy & risk
+        var2 = _strategy_sentence(strategy, risk_profile)
+
+        # Build an equity split sentence only when equity is meaningful
+        parts = []
+        if large > 0: parts.append(f"{large}% in large companies for stability")
+        if mid   > 0: parts.append(f"{mid}% in mid-sized companies for growth")
+        if small > 0: parts.append(f"{small}% in smaller companies for extra growth potential")
+        split_sentence = "; ".join(parts) if parts else "equities"
+
+        var3 = (
+            f"In Year 1, your money starts with {int(year1_equity_pct)}% in equities — "
+            f"split into {split_sentence}. The rest is in debt ({debt}%) for balance, "
+            "and over time more will shift into debt to protect your savings."
+        )
+
+    # Part 4 — closing
+    var4 = (
+        "This isn’t guesswork. It’s a disciplined plan built only for you. "
+        "And we’ll review and rebalance regularly to keep you on track."
     )
-    var4 = ("This isn’t guesswork. It’s a disciplined plan built only for you. "
-            "And we’ll review and rebalance regularly to keep you on track.")
 
-    return {"explainer 1": var1, "explainer 2": var2, "explainer 3": var3, "explainer 4": var4}
+    return {
+        "explainer 1": var1,
+        "explainer 2": var2,
+        "explainer 3": var3,
+        "explainer 4": var4,
+    }
 
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
@@ -422,17 +464,27 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             ]
         )
 
-        # New 4-part explainer
+               # === ✅ New 4-part explainer generation ===
         name = inputs.get("User Name") or inputs.get("Name") or "Investor"
         target_corpus = inputs.get("Target Corpus")
+
+        # Funding ratio converted to percentage
         try:
-            fr_center_pct = float(processed_output.get("funding_ratio", 0)) * 100.0  # to %
+            fr_center_pct = float(processed_output.get("funding_ratio", 0)) * 100.0
         except:
             fr_center_pct = 0.0
+
+        # Year 1 equity allocation from glide path
         try:
             y1_equity = int(processed_output["glide_path"][0]['Equity Allocation (%)'])
         except Exception:
             y1_equity = 0
+
+        # ✅ Get years_to_goal from inputs (using parser in case it's a string like "54 (user is currently 37)")
+        years_to_goal_raw = inputs.get("Time to Goal (years)") or inputs.get("Time Horizon (years)")
+        years_to_goal = _to_years_from_any(years_to_goal_raw)
+
+        # ✅ Generate adaptive explainer
         four_part = generate_four_part_explainer(
             name=name,
             target_corpus=target_corpus,
@@ -441,7 +493,9 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             risk_profile=inputs.get("Risk Preference"),
             year1_equity_pct=y1_equity,
             portfolio_rows=processed_output.get("portfolio") or [],
+            years_to_goal=years_to_goal,  # ✅ <-- new parameter
         )
+
 
         # funding_ratio to Airtable with two decimals (ratio form)
         try:
