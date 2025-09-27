@@ -15,7 +15,7 @@ from glide_explainer import explain_glide_story
 from strategy_explainer import explain_strategy_story
 from portfolio_explainer import explain_portfolio_story
 
-__API_BUILD__ = "final-fix-current-corpus-4part-001"
+__API_BUILD__ = "final-fix-current-corpus-4part-002"
 app = FastAPI(title="SIPY Investment Engine API")
 
 app.add_middleware(
@@ -85,7 +85,7 @@ class PortfolioInput(BaseModel):
     target_corpus: float
     years_to_goal: int
     risk_profile: str  # 'conservative', 'moderate', 'aggressive'
-    current_corpus: Optional[float] = 0.0  # NEW: include current corpus
+    current_corpus: Optional[float] = 0.0  # include current corpus
 
 # ----------------- Engine Utility Functions -----------------
 def calculate_funding_ratio(monthly_investment: float,
@@ -198,7 +198,38 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     debt_filtered['Weight (%)'] = debt_pct / len(debt_filtered)
     return debt_filtered[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
-# ============= New: 4-part explainer helpers =============
+# ---------- NEW: Short-horizon equity filter (large-cap bias) ----------
+def _cap_bucket_from_name(name: str) -> str:
+    n = (name or "").lower()
+    if re.search(r"(nifty\s*50|sensex|large\s*cap|blue\s*chip|bluechip|top\s*100|nifty\s*100|s&p\s*bse\s*100)", n):
+        return "large"
+    if re.search(r"(mid\s*cap|midcap|nifty\s*midcap)", n):
+        return "mid"
+    if re.search(r"(small\s*cap|smallcap|nifty\s*smallcap)", n):
+        return "small"
+    return "other"
+
+def filter_equity_by_horizon(eq_df: pd.DataFrame, years_to_goal: int) -> pd.DataFrame:
+    if years_to_goal > 3:
+        return eq_df
+    df = eq_df.copy()
+    if 'Fund' not in df.columns:
+        cands = [c for c in df.columns if any(k in c.lower() for k in ['fund', 'scheme', 'name'])]
+        if cands:
+            df = df.rename(columns={cands[0]: 'Fund'})
+        else:
+            df['Fund'] = df.index.astype(str)
+    df['__cap_bucket__'] = df['Fund'].map(_cap_bucket_from_name)
+    large_only = df[df['__cap_bucket__'] == 'large'].copy()
+    if not large_only.empty:
+        return large_only.drop(columns='__cap_bucket__')
+    if 'Sub-category' in df.columns:
+        broad = df[df['Sub-category'].str.contains(r"(large|blue)", case=False, na=False)].copy()
+        if not broad.empty:
+            return broad.drop(columns='__cap_bucket__')
+    return df.drop(columns='__cap_bucket__')
+
+# ============= 4-part explainer helpers =============
 def _pct(val) -> int:
     try: return max(0, min(100, int(round(float(val)))))
     except: return 0
@@ -268,13 +299,11 @@ def generate_four_part_explainer(
     risk_profile: Optional[str],
     year1_equity_pct: int,
     portfolio_rows: List[Dict[str, Any]],
-    years_to_goal: int,   # ✅ new param
+    years_to_goal: int,
 ) -> Dict[str, str]:
-    """Return {'explainer 1'..'explainer 4'} with adaptive story for short horizons."""
     target_str = _money(target_corpus)
     fr_display = _range_pm5(funding_ratio_pct_center)
 
-    # Part 1 — funding gap + context
     var1 = (
         f"Hi {name}, here’s where you stand. If you continue as you are, "
         f"you’ll likely reach only {fr_display} of your goal of {target_str}.\n\n"
@@ -283,31 +312,25 @@ def generate_four_part_explainer(
         "That’s what we use to calculate your funding gap."
     )
 
-    # Short-horizon mode (≤3 years): capital protection first
     if years_to_goal <= 3:
         debt_pct = max(0, 100 - int(year1_equity_pct))
         var2 = (
             "With your goal so close, protecting your savings matters more than chasing returns. "
             "We recommend a conservative, capital-first approach — mostly debt, with a small equity slice for gentle growth."
         )
-        # Keep it simple; don’t talk about large/mid cap splits in tiny equity allocations
         var3 = (
             f"In Year 1, your money starts with {int(year1_equity_pct)}% in equities and {debt_pct}% in debt. "
             "This mix is designed to keep your corpus safe while still giving it a small boost before your goal."
         )
-
     else:
-        # Standard story for >3 years (use actual portfolio buckets)
         buckets = aggregate_portfolio_buckets(portfolio_rows)
         large = buckets.get("large_cap_pct", 0)
         mid   = buckets.get("mid_cap_pct", 0)
         small = buckets.get("small_cap_pct", 0)
         debt  = buckets.get("debt_pct", 0)
 
-        # Strategy line tuned by chosen strategy & risk
         var2 = _strategy_sentence(strategy, risk_profile)
 
-        # Build an equity split sentence only when equity is meaningful
         parts = []
         if large > 0: parts.append(f"{large}% in large companies for stability")
         if mid   > 0: parts.append(f"{mid}% in mid-sized companies for growth")
@@ -320,27 +343,19 @@ def generate_four_part_explainer(
             "and over time more will shift into debt to protect your savings."
         )
 
-    # Part 4 — closing
     var4 = (
         "This isn’t guesswork. It’s a disciplined plan built only for you. "
         "And we’ll review and rebalance regularly to keep you on track."
     )
 
-    return {
-        "explainer 1": var1,
-        "explainer 2": var2,
-        "explainer 3": var3,
-        "explainer 4": var4,
-    }
+    return {"explainer 1": var1, "explainer 2": var2, "explainer 3": var3, "explainer 4": var4}
 
 # ================= API Endpoint =================
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
     try:
-        # Expected return from profile & horizon
         annual_er = expected_return_from_profile(user_input.years_to_goal, user_input.risk_profile)
 
-        # Include current corpus in funding ratio
         fv, funding_ratio = calculate_funding_ratio(
             monthly_investment=user_input.monthly_investment,
             current_corpus=user_input.current_corpus or 0.0,
@@ -349,11 +364,9 @@ def generate_portfolio(user_input: PortfolioInput):
             annual_expected_return=annual_er
         )
 
-        # Strategy & Glide Path
         strategy = choose_strategy(user_input.years_to_goal, user_input.risk_profile, funding_ratio)
         glide_path = generate_step_down_glide_path(user_input.years_to_goal, funding_ratio, user_input.risk_profile)
 
-        # Year-1 buckets
         glide_equity_pct = int(glide_path.iloc[0]['Equity Allocation (%)'])
         if 0 < glide_equity_pct < 10: glide_equity_pct = 10
         glide_debt_pct = 100 - glide_equity_pct
@@ -370,6 +383,10 @@ def generate_portfolio(user_input: PortfolioInput):
             raise ValueError("Invalid strategy")
 
         eq_df = standardize_fund_col(eq_df)
+
+        # ✅ short-horizon: keep only large-cap style equity funds
+        eq_df = filter_equity_by_horizon(eq_df, user_input.years_to_goal)
+
         eq_df['Category'] = 'Equity'
         if 'Weight' not in eq_df.columns: eq_df['Weight'] = 1.0
 
@@ -395,7 +412,6 @@ def generate_portfolio(user_input: PortfolioInput):
         if final_portfolio['Weight (%)'].sum() != 100:
             raise ValueError("Final portfolio does not sum to 100%.")
 
-        # ---------- Existing explainer blocks ----------
         glide_context = {
             "years_to_goal": user_input.years_to_goal,
             "risk_profile": user_input.risk_profile,
@@ -416,7 +432,7 @@ def generate_portfolio(user_input: PortfolioInput):
 
         return {
             "strategy": strategy,
-            "funding_ratio": round(float(funding_ratio), 4),  # ratio form (e.g., 0.31)
+            "funding_ratio": round(float(funding_ratio), 4),
             "glide_path": glide_path.to_dict(orient="records"),
             "portfolio": final_portfolio.to_dict(orient="records"),
             "glide_explainer": glide_block,
@@ -445,7 +461,6 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         record = airtable.get(record_id)
         inputs = record.get('fields', {})
 
-        # Build user input from Airtable (use "Time to goal" & Current Corpus)
         user_input_data = {
             "monthly_investment": _to_float(inputs.get("Monthly Investments"), 0.0),
             "target_corpus": _to_float(inputs.get("Target Corpus"), 0.0),
@@ -456,7 +471,6 @@ async def trigger_processing(payload: AirtableWebhookPayload):
 
         processed_output = generate_portfolio(PortfolioInput(**user_input_data))
 
-        # Format glide path as "{1, 70, 30}, {2, 70, 30}, ..."
         formatted_glide_path = ", ".join(
             [
                 f"{{{row['Year']}, {row['Equity Allocation (%)']}, {row['Debt Allocation (%)']}}}"
@@ -464,27 +478,23 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             ]
         )
 
-               # === ✅ New 4-part explainer generation ===
+        # === New 4-part explainer generation ===
         name = inputs.get("User Name") or inputs.get("Name") or "Investor"
         target_corpus = inputs.get("Target Corpus")
 
-        # Funding ratio converted to percentage
         try:
             fr_center_pct = float(processed_output.get("funding_ratio", 0)) * 100.0
         except:
             fr_center_pct = 0.0
 
-        # Year 1 equity allocation from glide path
         try:
             y1_equity = int(processed_output["glide_path"][0]['Equity Allocation (%)'])
         except Exception:
             y1_equity = 0
 
-        # ✅ Get years_to_goal from inputs (using parser in case it's a string like "54 (user is currently 37)")
-        years_to_goal_raw = inputs.get("Time to Goal (years)") or inputs.get("Time Horizon (years)")
+        years_to_goal_raw = inputs.get("Time to goal") or inputs.get("Time Horizon (years)")
         years_to_goal = _to_years_from_any(years_to_goal_raw)
 
-        # ✅ Generate adaptive explainer
         four_part = generate_four_part_explainer(
             name=name,
             target_corpus=target_corpus,
@@ -493,11 +503,9 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             risk_profile=inputs.get("Risk Preference"),
             year1_equity_pct=y1_equity,
             portfolio_rows=processed_output.get("portfolio") or [],
-            years_to_goal=years_to_goal,  # ✅ <-- new parameter
+            years_to_goal=years_to_goal,
         )
 
-
-        # funding_ratio to Airtable with two decimals (ratio form)
         try:
             fr_val = float(processed_output.get("funding_ratio", 0.0))
         except:
@@ -505,13 +513,12 @@ async def trigger_processing(payload: AirtableWebhookPayload):
 
         update_data = {
             "strategy": processed_output["strategy"],
-            "funding_ratio": round(fr_val, 2),  # e.g., 0.31
+            "funding_ratio": round(fr_val, 2),  # ratio form, 2dp
             "glide_path": formatted_glide_path,
             "portfolio": json.dumps(processed_output["portfolio"]),
             "glide_explainer_story": processed_output["glide_explainer"]["story"],
             "strategy_explainer_story": processed_output["strategy_explainer"]["story"],
             "portfolio_explainer_story": processed_output["portfolio_explainer"]["story"],
-            # New 4-part explainer
             "explainer 1": four_part["explainer 1"],
             "explainer 2": four_part["explainer 2"],
             "explainer 3": four_part["explainer 3"],
