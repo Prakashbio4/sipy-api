@@ -9,6 +9,9 @@ import os
 from fastapi.middleware.cors import CORSMiddleware
 from pyairtable import Api
 import re
+import httpx
+import datetime
+import hashlib
 
 # === Explainers (stories layer) — existing ===
 from glide_explainer import explain_glide_story
@@ -23,6 +26,63 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+# --- Airtable Environment Variables ---
+AIRTABLE_KEY  = os.getenv("AIRTABLE_API_KEY")
+AIRTABLE_BASE = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TBL  = os.getenv("AIRTABLE_TABLE")
+AIRTABLE_VIEW = os.getenv("AIRTABLE_VIEW", "Grid view")
+
+for k, v in [("AIRTABLE_API_KEY", AIRTABLE_KEY), ("AIRTABLE_BASE_ID", AIRTABLE_BASE), ("AIRTABLE_TABLE", AIRTABLE_TBL)]:
+    if v is None:
+        raise RuntimeError(f"Missing required environment variable: {k}")
+
+def _hdr():
+    return {"Authorization": f"Bearer {AIRTABLE_KEY}"}
+
+async def _airtable_get_record(record_id: str):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{AIRTABLE_TBL}/{record_id}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(url, headers=_hdr())
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+def _parse_portfolio(v):
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            return None
+    return None
+
+def _normalize_glide(v):
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        # try JSON first
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        # fallback parser for "{1, 90, 10}, ..."
+        items = []
+        for chunk in v.split("},"):
+            parts = [p.strip(" {}") for p in chunk.split(",") if p.strip()]
+            if len(parts) >= 3:
+                try:
+                    y, e, d = int(parts[0]), int(parts[1]), int(parts[2])
+                    items.append({"Year": y, "Equity Allocation (%)": e, "Debt Allocation (%)": d})
+                except Exception:
+                    pass
+        return items or None
+    return None
 
 # --------------------- Helpers (parsing & math) ---------------------
 def _to_years_from_any(x, default=0):
@@ -449,7 +509,8 @@ class AirtableWebhookPayload(BaseModel):
 
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = "Investor_inputs"
+# 🔧 use env table name; default to correct casing
+AIRTABLE_TABLE_NAME = os.environ.get("AIRTABLE_TABLE", "Investor_Inputs")
 
 api = Api(AIRTABLE_API_KEY)
 airtable = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
@@ -534,6 +595,28 @@ async def trigger_processing(payload: AirtableWebhookPayload):
 @app.get("/health")
 def health():
     return {"ok": True, "build": __API_BUILD__}
+
+@app.get("/portfolio")
+async def get_portfolio(recordId: str):
+    raw = await _airtable_get_record(recordId)
+    fields = raw.get("fields", {})
+
+    portfolio = _parse_portfolio(fields.get("portfolio"))
+    glide_path = _normalize_glide(fields.get("glide_path"))
+
+    return {
+        "record_id": raw.get("id"),
+        "user_id": fields.get("User ID (primary)"),
+        "user_name": fields.get("User Name"),
+        "strategy": fields.get("strategy"),
+        "funding_ratio": fields.get("funding_ratio"),
+        "glide_path": glide_path,
+        "portfolio": portfolio or [],   # safe default if parse fails
+        "glide_explainer_story": fields.get("glide_explainer_story"),
+        "strategy_explainer_story": fields.get("strategy_explainer_story"),
+        "portfolio_explainer_story": fields.get("portfolio_explainer_story"),
+        "fetched_at": datetime.datetime.utcnow().isoformat() + "Z"
+    }
 
 if __name__ == "__main__":
     import uvicorn
