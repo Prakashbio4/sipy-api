@@ -256,6 +256,66 @@ def airtable_record_to_ctx(record: dict) -> dict:
     }
     return ctx
 
+# ---------------- Story helpers for Explainer 1 ----------------
+
+def _band_percent(center_pct: float, width: int = 5) -> tuple[int, int]:
+    """
+    Given a center percent (e.g., 77.0, 100.0, 320.0) return a clipped [lo, hi] band.
+    We keep it simple and integer (e.g., 95–105).
+    """
+    if center_pct is None:
+        center_pct = 0.0
+    lo = max(0, int(round(center_pct)) - width)
+    hi = int(round(center_pct)) + width
+    return lo, hi
+
+def _band_multiple(center_pct: float, width: int = 5) -> tuple[float, float]:
+    """
+    Convert a percent band to an X-multiple band, rounded to one decimal (e.g., 3.0–3.2×).
+    """
+    lo_pct, hi_pct = _band_percent(center_pct, width)
+    lo_x = round(lo_pct / 100.0, 1)
+    hi_x = round(hi_pct / 100.0, 1)
+    return lo_x, hi_x
+
+def _explainer1_story(name: str, goal_amount_str: str, funding_ratio_center_pct: float) -> str:
+    """
+    Explainer 1 with three cases:
+      - Underfunded (FR < 0.90)
+      - On track   (0.90 <= FR <= 1.10)
+      - Overfunded (FR > 1.10)
+    We never mention 'funding ratio' to users.
+    """
+    fr_dec = (funding_ratio_center_pct or 0.0) / 100.0
+    lo_pct, hi_pct = _band_percent(funding_ratio_center_pct, width=5)
+
+    if fr_dec < 0.90:
+        # Underfunded — “Not there yet”
+        return (
+            f"Hi {name}, here’s where you stand. If you continue as you are, you’re likely to reach about "
+            f"{lo_pct}–{hi_pct}% of your goal of {goal_amount_str} by the time you need it.\n\n"
+            "That means we still have some work to do — but the good news is, small changes in how much you invest "
+            "or how your money is allocated can close that gap and put you firmly on track."
+        )
+
+    if fr_dec <= 1.10:
+        # Fully funded — “On track”
+        return (
+            f"Hi {name}, here’s where you stand. If you continue as you are, you’re on track to reach your "
+            f"goal of {goal_amount_str}, likely landing around {lo_pct}–{hi_pct}% by the time you need it.\n\n"
+            "Why a range? Because markets don’t deliver the same return every year. Over the past 5 years, equities "
+            "have averaged around 10–15% annually, and your plan is built to adapt within that range."
+        )
+
+    # Overfunded — “Ahead of the curve”
+    lo_x, hi_x = _band_multiple(funding_ratio_center_pct, width=5)
+    return (
+        f"Hi {name}, here’s where you stand. If you continue as you are, you’re on track to exceed your goal "
+        f"of {goal_amount_str} — potentially reaching ~{lo_x}–{hi_x}× that amount by the time you need it.\n\n"
+        "That’s a great place to be. It means you’ll have options: you could achieve the goal sooner, aim for a bigger dream, "
+        "or even reduce your monthly investment and still get there comfortably."
+    )
+
 # ---------------- Story builders ----------------
 
 def _strategy_sentence(strategy: str, risk_profile: str | None) -> str:
@@ -286,7 +346,6 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     name        = (ctx.get("name") or "Investor").strip()
     target_str  = _money(ctx.get("target_corpus"))
     fr_center   = ctx.get("funding_ratio_pct", 0)
-    fr_display  = _range_plus_minus_5(fr_center)
 
     strategy    = (ctx.get("strategy") or "").strip().title() or "Active"
     risk_prof   = (ctx.get("risk_profile") or "").strip()
@@ -299,18 +358,13 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     provided_sum = sum(v for v in [large, mid, small] if v)
     debt        = _pct(ctx.get("debt_pct") if ctx.get("debt_pct") is not None else (100 - provided_sum))
 
-    var1 = (
-        f"Hi {name}, here’s where you stand. If you continue as you are, "
-        f"you’ll likely reach only {fr_display} of your goal of {target_str}.\n\n"
-        "Why the range? Because markets don’t return the same number every time. "
-        "Over the past 5 years, equities have averaged between 10–15% per year. "
-        "That’s what we use to calculate your funding gap."
-    )
+    # -------- Explainer 1 (new story-first logic)
+    var1 = _explainer1_story(name=name, goal_amount_str=target_str, funding_ratio_center_pct=fr_center)
 
-    # Strategy sentence tailored to risk profile and choice
+    # -------- Explainer 2 (unchanged)
     var2 = _strategy_sentence(strategy, risk_prof)
 
-    # Allocation sentence (include small if present)
+    # -------- Explainer 3 (unchanged; include small if present)
     if large > 0 or mid > 0 or small > 0:
         parts = []
         if large > 0: parts.append(f"{large}% in large companies for stability")
@@ -327,6 +381,7 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
             f"The rest is in debt for balance, and over time more will shift into debt to protect your savings."
         )
 
+    # -------- Explainer 4 (unchanged)
     var4 = (
         "This isn’t guesswork. It’s a disciplined plan built only for you. "
         "And we’ll review and rebalance regularly to keep you on track."
@@ -365,7 +420,7 @@ if __name__ == "__main__":
     ctx = {
         "name": "GANESH KUMAR R",
         "target_corpus": 5e7,  # ₹5 Cr
-        "funding_ratio_pct": 21,  # shows as 16–26%
+        "funding_ratio_pct": 21,  # shows as ~16–26% band internally
         "strategy": "Passive",
         "risk_profile": "Conservative",
         "equity_start_pct": 80,

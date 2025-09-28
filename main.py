@@ -351,6 +351,48 @@ def _strategy_sentence(strategy: str, risk_profile: Optional[str]) -> str:
     return ("To help close the gap faster (with more ups and downs), we recommend an Active strategy — "
             "expert-managed funds that aim to add value over the market.")
 
+# -------- NEW: Story-only Explainer 1 helper (no FR wording) --------
+def _band_percent(center_pct: float, width: int = 5) -> tuple[int, int]:
+    if center_pct is None:
+        center_pct = 0.0
+    lo = max(0, int(round(center_pct)) - width)
+    hi = int(round(center_pct)) + width
+    return lo, hi
+
+def _band_multiple(center_pct: float, width: int = 5) -> tuple[float, float]:
+    lo_pct, hi_pct = _band_percent(center_pct, width)
+    lo_x = round(lo_pct / 100.0, 1)
+    hi_x = round(hi_pct / 100.0, 1)
+    return lo_x, hi_x
+
+def build_explainer1_story(name: str, goal_amount_str: str, funding_ratio_center_pct: float) -> str:
+    fr_dec = (funding_ratio_center_pct or 0.0) / 100.0
+    lo_pct, hi_pct = _band_percent(funding_ratio_center_pct, width=5)
+
+    if fr_dec < 0.90:
+        return (
+            f"Hi {name}, here’s where you stand. If you continue as you are, you’re likely to reach about "
+            f"{lo_pct}–{hi_pct}% of your goal of {goal_amount_str} by the time you need it.\n\n"
+            "That means we still have some work to do — but the good news is, small changes in how much you invest "
+            "or how your money is allocated can close that gap and put you firmly on track."
+        )
+
+    if fr_dec <= 1.10:
+        return (
+            f"Hi {name}, here’s where you stand. If you continue as you are, you’re on track to reach your "
+            f"goal of {goal_amount_str}, likely landing around {lo_pct}–{hi_pct}% by the time you need it.\n\n"
+            "Why a range? Because markets don’t deliver the same return every year. Over the past 5 years, equities "
+            "have averaged around 10–15% annually, and your plan is built to adapt within that range."
+        )
+
+    lo_x, hi_x = _band_multiple(funding_ratio_center_pct, width=5)
+    return (
+        f"Hi {name}, here’s where you stand. If you continue as you are, you’re on track to exceed your goal "
+        f"of {goal_amount_str} — potentially reaching ~{lo_x}–{hi_x}× that amount by the time you need it.\n\n"
+        "That’s a great place to be. It means you’ll have options: you could achieve the goal sooner, aim for a bigger dream, "
+        "or even reduce your monthly investment and still get there comfortably."
+    )
+
 def generate_four_part_explainer(
     name: str,
     target_corpus: Any,
@@ -362,16 +404,15 @@ def generate_four_part_explainer(
     years_to_goal: int,
 ) -> Dict[str, str]:
     target_str = _money(target_corpus)
-    fr_display = _range_pm5(funding_ratio_pct_center)
 
-    var1 = (
-        f"Hi {name}, here’s where you stand. If you continue as you are, "
-        f"you’ll likely reach only {fr_display} of your goal of {target_str}.\n\n"
-        "Why the range? Because markets don’t return the same number every time. "
-        "Over the past 5 years, equities have averaged between 10–15% per year. "
-        "That’s what we use to calculate your funding gap."
+    # --- NEW Explainer 1 (story-based, no FR wording)
+    var1 = build_explainer1_story(
+        name=name,
+        goal_amount_str=target_str,
+        funding_ratio_center_pct=funding_ratio_pct_center
     )
 
+    # --- var2/var3/var4 remain as in your current code ---
     if years_to_goal <= 3:
         debt_pct = max(0, 100 - int(year1_equity_pct))
         var2 = (
