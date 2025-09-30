@@ -378,7 +378,7 @@ def generate_portfolio(user_input: PortfolioInput):
         }
         strategy_block = explain_strategy_story(strategy_context)
 
-        portfolio_block = explain_portfolio_story(display_portfolio)
+        portfolio_block = explain_portfolio_story(final_portfolio)
 
         return {
             "strategy": strategy,
