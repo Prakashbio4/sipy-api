@@ -479,6 +479,12 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "explainer 4": parts["var4"],
         }
 
+print("[explainer previews]")
+for k in ("var1","var2","var3","var4"):
+    txt = (parts.get(k) or "").replace("\n", " ")
+    print(f"{k}: {txt[:140]}...")
+
+
         airtable.update(record_id, fields=update_data)
         return {"status": "success", "record_id": record_id}
 

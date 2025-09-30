@@ -140,7 +140,7 @@ def parse_portfolio(value):
                 w = 0.0
             cat = (row.get("Category") or "").lower()
             fund = row.get("Fund") or ""
-            type_str = (row.get("Type") or "").lower()
+            type_str = (row.get("Type") or row.get("Sub-category") or "").lower()
 
             if "debt" in cat or "liquid" in type_str:
                 debt += w
