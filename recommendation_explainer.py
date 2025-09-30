@@ -1,5 +1,6 @@
-# ================= recommendation_explainer.py =================
-# Generates a short, layman-friendly 4-part explainer (human-advisor tone).
+# =============== recommendation_explainer.py ===============
+# Conversational 4-part explainers for all Funding Ratio x Strategy scenarios
+# Tone: human advisor (plain, warm, confident), with simple bridges.
 from typing import Dict, Any, List, Optional
 import json
 import re
@@ -26,20 +27,16 @@ def _money(val) -> str:
         return f"₹{v/1e5:.2f}L"
     return f"₹{v:,.0f}"
 
-# ---------------- Free-text / JSON parsers ----------------
-
-def _parse_percent_from_text(text, keys):
-    if not isinstance(text, str):
-        return None
-    t = text.lower()
-    for k in keys:
-        m = re.search(rf"{re.escape(k)}\s*[:=\-]?\s*(\d+(?:\.\d+)?)\s*%?", t)
-        if m:
-            try:
-                return int(round(float(m.group(1))))
-            except Exception:
-                pass
-    return None
+def _band_percent(center_pct: float, width: int = 5) -> tuple[int, int]:
+    """
+    Given a *percent* (e.g., 77.3), return an integer band +/- width, clipped to [0, 999].
+    We use 999 upper clip just to be safe for very high FR%.
+    """
+    if center_pct is None:
+        center_pct = 0.0
+    lo = max(0, int(round(center_pct)) - width)
+    hi = min(999, int(round(center_pct)) + width)
+    return lo, hi
 
 def _coerce_pct(val):
     if val is None:
@@ -49,67 +46,7 @@ def _coerce_pct(val):
     except Exception:
         return None
 
-def parse_glide_path(value):
-    """
-    Parse 'glide_path' into:
-      - equity_start_pct
-      - equity_end_pct (optional)
-    """
-    out = {}
-    if isinstance(value, dict):
-        out["equity_start_pct"] = _coerce_pct(value.get("equity_start_pct"))
-        out["equity_end_pct"]   = _coerce_pct(value.get("equity_end_pct"))
-        return out
-
-    if isinstance(value, list) and value:
-        first = value[0]
-        if isinstance(first, dict):
-            start = first.get("Equity Allocation (%)")
-            if start is not None:
-                out["equity_start_pct"] = _coerce_pct(start)
-        return out
-
-    if isinstance(value, str):
-        s = value.strip()
-        # Try JSON
-        try:
-            obj = json.loads(s)
-            if isinstance(obj, dict):
-                out["equity_start_pct"] = _coerce_pct(obj.get("equity_start_pct"))
-                out["equity_end_pct"]   = _coerce_pct(obj.get("equity_end_pct"))
-                return out
-            if isinstance(obj, list) and obj:
-                first = obj[0]
-                if isinstance(first, dict):
-                    start = first.get("Equity Allocation (%)")
-                    if start is not None:
-                        out["equity_start_pct"] = _coerce_pct(start)
-                        return out
-        except Exception:
-            pass
-
-        # Pattern like "{1, 80, 20}, {2, 80, 20}, ..."
-        m = re.search(r"\{\s*\d+\s*,\s*(\d+)\s*,\s*\d+\s*\}", s)
-        if m:
-            out["equity_start_pct"] = _coerce_pct(m.group(1))
-            return out
-
-        # Keyed fallback
-        start = _parse_percent_from_text(s, ["start", "equity_start", "year 1", "y1", "equity"])
-        end   = _parse_percent_from_text(s, ["end", "equity_end", "near goal", "final"])
-        out["equity_start_pct"] = start
-        out["equity_end_pct"]   = end
-        if start is not None or end is not None:
-            return out
-
-        # Fallback: first two numbers
-        nums = re.findall(r"(\d+(?:\.\d+)?)\s*%?", s)
-        if nums:
-            out["equity_start_pct"] = _coerce_pct(nums[0])
-            if len(nums) > 1:
-                out["equity_end_pct"] = _coerce_pct(nums[1])
-
-    return out
+# ---------------- Portfolio parsing ----------------
 
 def _bucket_from_fund_name(name: str) -> str:
     n = (name or "").lower()
@@ -117,21 +54,21 @@ def _bucket_from_fund_name(name: str) -> str:
         return "small"
     if "midcap" in n or "mid cap" in n:
         return "mid"
-    if "nifty 50" in n or "nifty50" in n or "next 50" in n or "nifty next 50" in n or "bluechip" in n or "large" in n:
+    if ("nifty 50" in n or "nifty50" in n or "next 50" in n
+        or "nifty next 50" in n or "bluechip" in n or "large" in n
+        or "nifty 100" in n or "top 100" in n or "bse 100" in n):
         return "large"
     return "other"
 
 def parse_portfolio(value):
     """
-    Parse 'portfolio' (list of dicts: Fund, Category, Type, Weight (%)) into aggregate buckets:
-      - large_cap_pct
-      - mid_cap_pct
-      - small_cap_pct (optional)
-      - debt_pct (optional)
+    Parse 'portfolio' (list of dicts: Fund, Category, Type|Sub-category, Weight (%))
+    into aggregate buckets (approximate):
+      - large_cap_pct, mid_cap_pct, small_cap_pct, debt_pct
     """
     out = {}
 
-    def _agg_from_list(lst: List[dict]):
+    def _agg(lst: List[dict]):
         large = mid = small = debt = other = 0.0
         for row in lst:
             try:
@@ -139,10 +76,10 @@ def parse_portfolio(value):
             except Exception:
                 w = 0.0
             cat = (row.get("Category") or "").lower()
+            t = (row.get("Type") or row.get("Sub-category") or "").lower()
             fund = row.get("Fund") or ""
-            type_str = (row.get("Type") or row.get("Sub-category") or "").lower()
 
-            if "debt" in cat or "liquid" in type_str:
+            if "debt" in cat or "liquid" in t:
                 debt += w
             elif "equity" in cat:
                 b = _bucket_from_fund_name(fund)
@@ -150,6 +87,7 @@ def parse_portfolio(value):
                 elif b == "mid": mid += w
                 elif b == "small": small += w
                 else: other += w
+
         total = large + mid + small + debt + other
         if total > 0:
             scale = 100.0 / total
@@ -162,107 +100,107 @@ def parse_portfolio(value):
         }
 
     if isinstance(value, list):
-        return _agg_from_list(value)
-
+        return _agg(value)
     if isinstance(value, str):
         s = value.strip()
         try:
             obj = json.loads(s)
             if isinstance(obj, list):
-                return _agg_from_list(obj)
+                return _agg(obj)
         except Exception:
             pass
-
     return out
 
-# ---------------- Story helpers for Explainer 1 ----------------
+# ---------------- Mirror moment (Explainer 1) ----------------
 
-def _band_percent(center_pct: float, width: int = 5) -> tuple[int, int]:
+def _mirror_sentence(name: str,
+                     goal_amount_str: str,
+                     funding_ratio_pct: float,
+                     funding_ratio_dec: float,
+                     years_to_goal: Optional[int],
+                     status: str) -> str:
     """
-    Given a center percent (e.g., 77.0, 100.0, 320.0) return a clipped [lo, hi] band.
-    We keep it simple and integer (e.g., 95–105).
+    status in {"underfunded", "balanced", "overfunded"}
+    We show a +/-5% band (rounded ints) around funding_ratio_pct.
     """
-    if center_pct is None:
-        center_pct = 0.0
-    lo = max(0, int(round(center_pct)) - width)
-    hi = int(round(center_pct)) + width
-    return lo, hi
+    lo, hi = _band_percent(funding_ratio_pct, width=5)
+    yr_line = f"\n\nWe have about {years_to_goal} year(s) ahead of us, which gives us room to steer this right." if years_to_goal else ""
 
-def _band_multiple(center_pct: float, width: int = 5) -> tuple[float, float]:
-    """
-    Convert a percent band to an X-multiple band, rounded to one decimal (e.g., 3.0–3.2×).
-    """
-    lo_pct, hi_pct = _band_percent(center_pct, width)
-    lo_x = round(lo_pct / 100.0, 1)
-    hi_x = round(hi_pct / 100.0, 1)
-    return lo_x, hi_x
-
-def _explainer1_story(name: str, goal_amount_str: str, funding_ratio_center_pct: float) -> str:
-    """
-    Explainer 1 with three cases:
-      - Underfunded (FR < 0.90)
-      - On track   (0.90 <= FR <= 1.10)
-      - Overfunded (FR > 1.10)
-    We never mention 'funding ratio' to users.
-    """
-    fr_dec = (funding_ratio_center_pct or 0.0) / 100.0
-    lo_pct, hi_pct = _band_percent(funding_ratio_center_pct, width=5)
-
-    if fr_dec < 0.90:
-        # Underfunded — “Not there yet”
+    if status == "underfunded":
         return (
-            f"Hi {name}, here’s where you stand. If you continue as you are, you’re likely to reach about "
-            f"{lo_pct}–{hi_pct}% of your goal of {goal_amount_str} by the time you need it.\n\n"
-            "That means we still have some work to do — but this is fixable. Small changes in how much you invest "
-            "or how your money is allocated can close the gap and put you on track."
+            f"Hi {name}, here’s where you stand. As of now, your plan is about {lo}–{hi}% funded. "
+            "We’re not at the finish line yet - and that’s okay. This is fixable.\n\n"
+            "It’s more common than you think to start in this range. We’ll make a few steady changes and close the gap."
+            f"{yr_line}"
         )
-
-    if fr_dec <= 1.10:
-        # On track
+    if status == "balanced":
         return (
-            f"Hi {name}, here’s where you stand. If you continue as you are, you’re on track to reach your "
-            f"goal of {goal_amount_str}, likely landing around {lo_pct}–{hi_pct}% by the time you need it.\n\n"
-            "Why a range? Markets don’t move the same every year. Your plan is built to adapt within normal ups and downs."
+            f"Hi {name}, here’s where you stand. Your plan looks on track - roughly {lo}–{hi}% funded. "
+            "That’s right where we want to be, with normal market ups and downs in mind.\n\n"
+            "We’ll keep the momentum, make small improvements, and stay disciplined."
+            f"{yr_line}"
         )
-
-    # Overfunded — “Ahead of the curve”
-    lo_x, hi_x = _band_multiple(funding_ratio_center_pct, width=5)
+    # overfunded
     return (
-        f"Hi {name}, here’s where you stand. If you continue as you are, you’re on track to exceed your goal "
-        f"of {goal_amount_str} — potentially reaching ~{lo_x}–{hi_x}× that amount by the time you need it.\n\n"
-        "That gives you options: reach the goal sooner, aim bigger, or reduce the monthly amount and still get there comfortably."
+        f"Hi {name}, here’s where you stand. You’re ahead - roughly {lo}–{hi}% funded against your goal. "
+        "That gives you options: reach the goal sooner, aim higher, or even ease the monthly amount.\n\n"
+        "We’ll choose the calmest path that still gets you the outcome you want."
+        f"{yr_line}"
     )
 
-# ---------------- Tone: strategy & evolution ----------------
+# ---------------- Strategy sentence (Explainer 2 core) ----------------
 
-def _strategy_sentence(strategy: str, risk_profile: Optional[str]) -> str:
+def _strategy_sentence(strategy: str, risk_profile: Optional[str], status: str) -> str:
+    """
+    Plain-language description of the chosen approach.
+    """
     s = (strategy or "").strip().title() or "Active"
     rp = (risk_profile or "").strip().lower()
 
     if s == "Passive":
+        # Lower cost, steady compounding; especially sensible if overfunded or short horizon
         return ("We’ll keep it simple with low-cost index funds. "
                 "They track the market, keep fees low, and let your money grow quietly.")
 
     if s == "Hybrid":
-        return ("We’ll use a Hybrid plan — index funds for the steady base, "
+        # Indices as base + limited active for selective edge
+        return ("We’ll use a Hybrid plan - index funds for a steady base, "
                 "and a small set of carefully chosen active funds to try and add a bit extra.")
 
     # Active
     if rp.startswith("conserv"):
-        return ("We’ll go Active but stay careful — a few expert-managed funds, "
+        return ("We’ll go Active but stay careful - a few expert-managed funds, "
                 "kept within sensible limits so risk doesn’t run ahead of you.")
-    return ("We’ll go Active — a few expert-managed funds aiming for better-than-market returns. "
-            "It can move more, so I’ll keep it within sensible limits.")
+    return ("We’ll go Active - a few expert-managed funds aiming for better-than-market returns. "
+            "It can go up and down, so I’ll keep it within sensible limits.")
 
-# ---------------- Story builders ----------------
+# ---------------- Main story builder ----------------
 
 def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     """
-    Returns story split into 4 variables (human-advisor tone).
+    Returns the conversational story split into 4 variables:
+      var1: Mirror moment (status)
+      var2: Strategy (with bridge)
+      var3: Glide path / evolution (with bridge)
+      var4: Portfolio setup / close (with bridge)
+    Expects ctx keys:
+      - name, target_corpus, funding_ratio_pct (0..100*X), strategy, risk_profile
+      - equity_start_pct, large_cap_pct, mid_cap_pct, small_cap_pct, debt_pct
+      - years_to_goal (optional)
     """
     name        = (ctx.get("name") or "Investor").strip()
     target_str  = _money(ctx.get("target_corpus"))
-    fr_center   = ctx.get("funding_ratio_pct", 0)
+    fr_pct      = float(ctx.get("funding_ratio_pct") or 0.0)             # e.g., 77.2
+    fr_dec      = fr_pct / 100.0                                         # e.g., 0.772
+    years       = ctx.get("years_to_goal") or ctx.get("time_to_goal") or ctx.get("horizon_years")
+
+    # Funding status per your thresholds
+    if fr_dec < 0.7:
+        status = "underfunded"
+    elif fr_dec >= 1.3:
+        status = "overfunded"
+    else:
+        status = "balanced"
 
     strategy    = (ctx.get("strategy") or "").strip().title() or "Active"
     risk_prof   = (ctx.get("risk_profile") or "").strip()
@@ -274,70 +212,87 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     provided_sum = sum(v for v in [large, mid, small] if v)
     debt        = _pct(ctx.get("debt_pct") if ctx.get("debt_pct") is not None else (100 - provided_sum))
 
-    # -------- Explainer 1 (mirror moment)
-    var1 = _explainer1_story(name=name, goal_amount_str=target_str, funding_ratio_center_pct=fr_center)
+    # -------- Explainer 1 (mirror moment with +/-5% band)
+    var1 = _mirror_sentence(
+        name=name,
+        goal_amount_str=target_str,
+        funding_ratio_pct=fr_pct,
+        funding_ratio_dec=fr_dec,
+        years_to_goal=years,
+        status=status
+    )
 
-    # -------- Bridges (plain language)
+    # -------- Bridges (universal, plain)
     b12 = "So what do we do now?"
     b23 = "Here’s how your plan changes over the years."
     b34 = "Now, let me show you the funds and weights."
 
-    # -------- Explainer 2 (strategy) WITH BRIDGE
-    var2_core = _strategy_sentence(strategy, risk_prof)
+    # -------- Explainer 2 (strategy)
+    var2_core = _strategy_sentence(strategy, risk_prof, status)
     var2 = f"{b12}\n\n{var2_core}"
 
-    # -------- Explainer 3 (evolution) WITH BRIDGE
+    # -------- Explainer 3 (evolution)
+    # Subtle tone nudge by status
+    if status == "underfunded":
+        tone_prefix = ""
+    elif status == "balanced":
+        tone_prefix = "We’ll keep the pace sensible and steady. "
+    else:  # overfunded
+        tone_prefix = "You’ve already done a lot of the hard work, so we’ll be conservative by design. "
+
     if large > 0 or mid > 0 or small > 0:
         parts = []
         if large > 0: parts.append(f"{large}% in large companies for stability")
         if mid > 0:   parts.append(f"{mid}% in mid-sized companies for growth")
         if small > 0: parts.append(f"{small}% in smaller companies for extra growth")
         split_sentence = "; ".join(parts)
+
         var3_body = (
-            f"In the first year, we start with {eq_start}% in equities — split into {split_sentence}. "
+            f"{tone_prefix}"
+            f"In the first year, we start with {eq_start}% in equities - split into {split_sentence}. "
             f"The rest sits in debt ({debt}%) to keep things steady. "
             "As the goal gets closer, we’ll move more into debt to lock in what you’ve earned."
         )
     else:
         var3_body = (
+            f"{tone_prefix}"
             f"In the first year, we start with {eq_start}% in equities. "
             "The rest sits in debt to keep things steady. "
             "As the goal gets closer, we’ll move more into debt to lock in what you’ve earned."
         )
     var3 = f"{b23}\n\n{var3_body}"
 
-    # -------- Explainer 4 (close) WITH BRIDGE TO PORTFOLIO/WRAP-UP
-    var4 = (
-        f"{b34}\n\n"
+    # -------- Explainer 4 (portfolio setup / close)
+    closing_line = (
         "This isn’t guesswork. It’s a disciplined plan built for you. "
         "I’ll review and rebalance regularly so you stay on track."
     )
+    var4 = f"{b34}\n\n{closing_line}"
 
     return {"var1": var1, "var2": var2, "var3": var3, "var4": var4}
-
 
 def build_recommendation_story(ctx: Dict[str, Any]) -> str:
     """Optional: full story in one string with plain paragraph breaks."""
     parts = build_recommendation_parts(ctx)
     return "\n\n".join([parts["var1"], parts["var2"], parts["var3"], parts["var4"]])
 
-# ---------------- Demo ----------------
+
+# ---------------- Minimal demo ----------------
 if __name__ == "__main__":
-    # Quick demo with a sample portfolio (4-column)
     sample_portfolio = [
-        {"Fund":"Motilal Oswal Nifty Midcap 150 Index Fund(G)-Direct Plan","Category":"Equity","Type":"Passive","Weight (%)":30},
-        {"Fund":"UTI Nifty 50 Index Fund(G)-Direct Plan","Category":"Equity","Type":"Passive","Weight (%)":25},
-        {"Fund":"Nippon India Nifty Smallcap 250 Index Fund(G)-Direct Plan","Category":"Equity","Type":"Passive","Weight (%)":15},
-        {"Fund":"ICICI Pru Liquid Fund(G)-Direct Plan","Category":"Debt","Type":"Liquid","Weight (%)":20},
-        {"Fund":"ICICI Pru Nifty Next 50 Index Fund(G)-Direct Plan","Category":"Equity","Type":"Passive","Weight (%)":10},
+        {"Fund":"UTI Nifty 50 Index Fund", "Category":"Equity", "Type":"Passive", "Weight (%)":40},
+        {"Fund":"Motilal Oswal Midcap 150 Index", "Category":"Equity", "Type":"Passive", "Weight (%)":30},
+        {"Fund":"Bandhan Small Cap Fund", "Category":"Equity", "Type":"Active", "Weight (%)":10},
+        {"Fund":"ICICI Pru Liquid", "Category":"Debt", "Type":"Liquid", "Weight (%)":20},
     ]
     ctx = {
-        "name": "GANESH KUMAR R",
-        "target_corpus": 5e7,  # ₹5 Cr
-        "funding_ratio_pct": 21,  # shows as ~16–26% band internally
-        "strategy": "Passive",
-        "risk_profile": "Conservative",
-        "equity_start_pct": 80,
+        "name": "Investor",
+        "target_corpus": 1e7,
+        "funding_ratio_pct": 77.0,     # will display 72–82%
+        "strategy": "Hybrid",
+        "risk_profile": "moderate",
+        "equity_start_pct": 85,
+        "years_to_goal": 12,
         **parse_portfolio(sample_portfolio),
     }
     print(build_recommendation_story(ctx))
