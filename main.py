@@ -376,12 +376,6 @@ async def trigger_processing(payload: AirtableWebhookPayload):
             "explainer 4": parts["var4"],
         }
 
-        # Optional: also write capitalized field names if they exist in your base
-        update_data.setdefault("Explainer 1", parts["var1"])
-        update_data.setdefault("Explainer 2", parts["var2"])
-        update_data.setdefault("Explainer 3", parts["var3"])
-        update_data.setdefault("Explainer 4", parts["var4"])
-
         # **Debug: show which fields we are writing**
         print("[airtable update fields]", list(update_data.keys()))
 
