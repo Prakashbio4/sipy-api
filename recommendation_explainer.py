@@ -277,38 +277,44 @@ def build_recommendation_parts(ctx: Dict[str, Any]) -> Dict[str, str]:
     # -------- Explainer 1 (mirror moment)
     var1 = _explainer1_story(name=name, goal_amount_str=target_str, funding_ratio_center_pct=fr_center)
 
-    # -------- Explainer 2 (plain language strategy)
-    var2 = _strategy_sentence(strategy, risk_prof)
+    # -------- Bridges (plain language)
+    b12 = "So what do we do now?"
+    b23 = "Here’s how your plan changes over the years."
+    b34 = "Now, let me show you the funds and weights."
 
-    # -------- Explainer 3 (bridge + direct evolution)
+    # -------- Explainer 2 (strategy) WITH BRIDGE
+    var2_core = _strategy_sentence(strategy, risk_prof)
+    var2 = f"{b12}\n\n{var2_core}"
+
+    # -------- Explainer 3 (evolution) WITH BRIDGE
     if large > 0 or mid > 0 or small > 0:
         parts = []
         if large > 0: parts.append(f"{large}% in large companies for stability")
         if mid > 0:   parts.append(f"{mid}% in mid-sized companies for growth")
         if small > 0: parts.append(f"{small}% in smaller companies for extra growth")
         split_sentence = "; ".join(parts)
-
-        var3 = (
-            "Here’s how your plan changes over the years.\n\n"
+        var3_body = (
             f"In the first year, we start with {eq_start}% in equities — split into {split_sentence}. "
             f"The rest sits in debt ({debt}%) to keep things steady. "
             "As the goal gets closer, we’ll move more into debt to lock in what you’ve earned."
         )
     else:
-        var3 = (
-            "Here’s how your plan changes over the years.\n\n"
+        var3_body = (
             f"In the first year, we start with {eq_start}% in equities. "
             "The rest sits in debt to keep things steady. "
             "As the goal gets closer, we’ll move more into debt to lock in what you’ve earned."
         )
+    var3 = f"{b23}\n\n{var3_body}"
 
-    # -------- Explainer 4 (simple, confident close)
+    # -------- Explainer 4 (close) WITH BRIDGE TO PORTFOLIO/WRAP-UP
     var4 = (
+        f"{b34}\n\n"
         "This isn’t guesswork. It’s a disciplined plan built for you. "
         "I’ll review and rebalance regularly so you stay on track."
     )
 
     return {"var1": var1, "var2": var2, "var3": var3, "var4": var4}
+
 
 def build_recommendation_story(ctx: Dict[str, Any]) -> str:
     """Optional: full story in one string with plain paragraph breaks."""
