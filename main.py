@@ -386,6 +386,26 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         # surface more detail for debugging
         raise HTTPException(status_code=500, detail=f"Failed to process record {payload.record_id}: {e}")
 
+@app.get("/portfolio")
+def get_portfolio(record_id: str = Query(..., alias="record_id")):
+    try:
+        record = airtable.get(record_id)
+        fields = record.get("fields", {})
+        return {
+            "record_id": record_id,
+            "strategy": fields.get("strategy"),
+            "funding_ratio": fields.get("funding_ratio"),
+            "glide_path": fields.get("glide_path"),
+            "explainer_1": fields.get("explainer 1"),
+            "explainer_2": fields.get("explainer 2"),
+            "explainer_3": fields.get("explainer 3"),
+            "explainer_4": fields.get("explainer 4"),
+            "portfolio": json.loads(fields.get("portfolio") or "[]"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Record not found: {e}")
+
+
 # ---------------- Debug endpoint (no Airtable) ----------------
 @app.post("/_debug/story")
 def debug_story(
