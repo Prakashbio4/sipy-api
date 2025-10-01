@@ -361,18 +361,33 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         # Guard against None → 0
         port_agg = {k: (v or 0) for k, v in port_agg.items()}
 
-        ctx = {
-            "name": fields.get("User Name") or fields.get("Name") or "Investor",
-            "target_corpus": fields.get("Target Corpus"),
-            "funding_ratio_pct": fr_center_pct,
-            "strategy": processed.get("strategy"),
-            "risk_profile": fields.get("Risk Preference"),
-            "equity_start_pct": y1_equity,
-            "large_cap_pct": port_agg.get("large_cap_pct"),
-            "mid_cap_pct": port_agg.get("mid_cap_pct"),
-            "small_cap_pct": port_agg.get("small_cap_pct"),
-            "debt_pct": port_agg.get("debt_pct"),
-        }
+ # --- PATCH: add horizon so explainer can switch to short-term mode ---
+years_horizon = _to_years_from_any(
+    fields.get("Time to goal", fields.get("Time Horizon (years)")), 
+    0.0
+)
+months_horizon = (
+    max(1, int(round(float(years_horizon) * 12)))
+    if years_horizon is not None 
+    else None
+)
+
+ctx = {
+    "name": fields.get("User Name") or fields.get("Name") or "Investor",
+    "target_corpus": fields.get("Target Corpus"),
+    "funding_ratio_pct": fr_center_pct,
+    "strategy": processed.get("strategy"),
+    "risk_profile": fields.get("Risk Preference"),
+    "equity_start_pct": y1_equity,
+    "large_cap_pct": port_agg.get("large_cap_pct"),
+    "mid_cap_pct": port_agg.get("mid_cap_pct"),
+    "small_cap_pct": port_agg.get("small_cap_pct"),
+    "debt_pct": port_agg.get("debt_pct"),
+    # ✅ NEW: enable scenario-aware storytelling
+    "years_to_goal": years_horizon,
+    "months_to_goal": months_horizon,
+}
+
 
         # **Debug: print ctx**
         print("[ctx]", ctx)
