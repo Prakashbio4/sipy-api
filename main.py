@@ -51,11 +51,16 @@ async def _airtable_get_record(record_id: str):
     return r.json()
 
 # ---------------- Helpers: parsing & math ----------------
-def _to_years_from_any(x, default=0):
-    if x is None: return default
-    if isinstance(x, int): return x
-    s = str(x); nums = re.findall(r"\d+", s)
-    return int(nums[0]) if nums else default
+# --- PATCH START: make years parser accept floats like 0.25; keep default as float ---
+def _to_years_from_any(x, default=0.0):
+    if x is None:
+        return default
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x)
+    m = re.search(r"[-+]?\d*\.?\d+", s)
+    return float(m.group(0)) if m else default
+# --- PATCH END ---
 
 def _to_float(x, default=0.0):
     if x is None: return default
@@ -92,23 +97,27 @@ def _load_csvs():
 active_eq, passive_eq, hybrid_eq, tmf, duration_debt = _load_csvs()
 
 # ------------- Pydantic -------------
+# --- PATCH START: accept fractional horizons from Airtable (e.g., 0.25 = 3 months) ---
 class PortfolioInput(BaseModel):
     monthly_investment: float
     target_corpus: float
-    years_to_goal: int
+    years_to_goal: float   # was int
     risk_profile: str
     current_corpus: Optional[float] = 0.0
+# --- PATCH END ---
 
 # ------------- Core engine -------------
 
+# --- PATCH START: precise fractional-years funding ratio + min 1 month guard ---
 def calculate_funding_ratio(monthly_investment, current_corpus, target_corpus, years, annual_expected_return):
     years = max(0.0, float(years))   # allow fractional years
     r_m = (1 + annual_expected_return) ** (1/12) - 1
-    n = int(round(years * 12))       # months, preserves fractional years
+    n = max(1, int(round(years * 12)))   # months, min 1 to avoid downstream zero-length issues
     fv_lumpsum = (current_corpus or 0.0) * ((1 + annual_expected_return) ** years)
     fv_sip = monthly_investment * (((1 + r_m) ** n - 1) / r_m) if r_m != 0 else monthly_investment * n
     fv_total = fv_lumpsum + fv_sip
     return fv_total, (fv_total / target_corpus) if target_corpus else 0.0
+# --- PATCH END ---
 
 def choose_strategy(time_to_goal, risk_profile, funding_ratio):
     if time_to_goal <= 3: return "Passive"
@@ -182,42 +191,60 @@ def get_debt_allocation(duration_debt_df, time_to_goal, debt_pct):
     df['Weight (%)'] = debt_pct / len(df)
     return df[['Fund', 'Category', 'Sub-category', 'Weight (%)']]
 
+# --- PATCH START: make glide path robust for sub-1-year inputs (never empty) ---
 def generate_step_down_glide_path(time_to_goal, funding_ratio, risk_profile):
+    # Coerce to at least 1 year and int for loop safety
+    time_to_goal = max(1, int(round(float(time_to_goal))))
+
     funding_ratio = float(funding_ratio)
     glide_path = []
+
     short_cap = 30 if time_to_goal <= 3 else 100
     if funding_ratio > 2.0: base_equity, start = 70, int(time_to_goal * 0.4)
     elif funding_ratio > 1.0: base_equity, start = 80, int(time_to_goal * 0.5)
     else: base_equity, start = 90, int(time_to_goal * 0.6)
+
     rp = (risk_profile or "").strip().lower()
     if rp == 'conservative': base_equity -= 10
     elif rp == 'aggressive': base_equity += 5
     base_equity = min(base_equity, short_cap)
+
     final_equity = 10
-    derisk_years = time_to_goal - start
+    derisk_years = max(1, time_to_goal - start)
     step = (base_equity - final_equity) / derisk_years if derisk_years > 0 else 0
+
     for y in range(1, time_to_goal + 1):
         e = base_equity if y <= start else base_equity - step * (y - start)
         e = int(round(max(min(e, short_cap), 0) / 5) * 5); e = 10 if 0 < e < 10 else e
         d = 100 - e; d = 10 if 0 < d < 10 else d; e = 100 - d
         glide_path.append({'Year': y, 'Equity Allocation (%)': int(e), 'Debt Allocation (%)': int(d)})
     return pd.DataFrame(glide_path)
+# --- PATCH END ---
 
 # ---------------- API: generate ----------------
 @app.post("/generate_portfolio/")
 def generate_portfolio(user_input: PortfolioInput):
     try:
+        # --- PATCH START: normalize years for functions that expect ints; keep fractional for funding ratio ---
+        safe_years_int = max(1, int(round(float(user_input.years_to_goal))))
+        # --- PATCH END ---
+
         # 1) math & strategy
-        annual_er = expected_return_from_profile(user_input.years_to_goal, user_input.risk_profile)
+        annual_er = expected_return_from_profile(safe_years_int, user_input.risk_profile)
         _, funding_ratio = calculate_funding_ratio(
             monthly_investment=user_input.monthly_investment,
             current_corpus=user_input.current_corpus or 0.0,
             target_corpus=user_input.target_corpus,
-            years=user_input.years_to_goal,
+            years=user_input.years_to_goal,               # keep fractional precision here
             annual_expected_return=annual_er
         )
-        strategy = choose_strategy(user_input.years_to_goal, user_input.risk_profile, funding_ratio)
+        strategy = choose_strategy(safe_years_int, user_input.risk_profile, funding_ratio)
         glide_path = generate_step_down_glide_path(user_input.years_to_goal, funding_ratio, user_input.risk_profile)
+
+        # --- PATCH START: ensure glide_path is never empty before iloc[0] ---
+        if isinstance(glide_path, pd.DataFrame) and glide_path.empty:
+            glide_path = pd.DataFrame([{'Year': 1, 'Equity Allocation (%)': 10, 'Debt Allocation (%)': 90}])
+        # --- PATCH END ---
 
         y1_equity = int(glide_path.iloc[0]['Equity Allocation (%)'])
         y1_debt   = 100 - y1_equity
@@ -233,7 +260,7 @@ def generate_portfolio(user_input: PortfolioInput):
             raise ValueError("Invalid strategy")
 
         eq_df = standardize_fund_col(eq_df)
-        eq_df = filter_equity_by_horizon(eq_df, user_input.years_to_goal)
+        eq_df = filter_equity_by_horizon(eq_df, safe_years_int)  # use normalized int horizon
         eq_df['Category'] = 'Equity'
         if 'Weight' not in eq_df.columns: eq_df['Weight'] = 1.0
 
@@ -244,7 +271,7 @@ def generate_portfolio(user_input: PortfolioInput):
                                        y1_equity, min_pct=10, step=5)
 
         # 3) debt
-        debt_df = get_debt_allocation(duration_debt, user_input.years_to_goal, y1_debt)
+        debt_df = get_debt_allocation(duration_debt, safe_years_int, y1_debt)  # use normalized int horizon
         debt_df = enforce_min_allocation(debt_df, y1_debt, min_pct=10, step=5)
 
         # 4) combine → final (keep Sub-category here)
@@ -301,7 +328,9 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         user_input_data = {
             "monthly_investment": _to_float(fields.get("Monthly Investments"), 0.0),
             "target_corpus": _to_float(fields.get("Target Corpus"), 0.0),
-            "years_to_goal": _to_years_from_any(fields.get("Time to goal", fields.get("Time Horizon (years)")), 0),
+            # --- PATCH START: accept fractional "Time to goal" values from Airtable ---
+            "years_to_goal": _to_years_from_any(fields.get("Time to goal", fields.get("Time Horizon (years)")), 0.0),
+            # --- PATCH END ---
             "risk_profile": fields.get("Risk Preference") or "",
             "current_corpus": _to_float(fields.get("Current Corpus"), 0.0),
         }
@@ -309,7 +338,7 @@ async def trigger_processing(payload: AirtableWebhookPayload):
         # Run the engine locally (no network roundtrip)
         processed = generate_portfolio(PortfolioInput(**user_input_data))
 
-        # Format glide path for Airtable
+        # Format glide path for Airtable (UNCHANGED)
         formatted_glide = ", ".join([
             f"{{{row['Year']}, {row['Equity Allocation (%)']}, {row['Debt Allocation (%)']}}}"
             for row in processed["glide_path"]
