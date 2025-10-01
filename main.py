@@ -100,10 +100,11 @@ class PortfolioInput(BaseModel):
     current_corpus: Optional[float] = 0.0
 
 # ------------- Core engine -------------
+
 def calculate_funding_ratio(monthly_investment, current_corpus, target_corpus, years, annual_expected_return):
-    years = max(0, int(years))
+    years = max(0.0, float(years))   # allow fractional years
     r_m = (1 + annual_expected_return) ** (1/12) - 1
-    n = years * 12
+    n = int(round(years * 12))       # months, preserves fractional years
     fv_lumpsum = (current_corpus or 0.0) * ((1 + annual_expected_return) ** years)
     fv_sip = monthly_investment * (((1 + r_m) ** n - 1) / r_m) if r_m != 0 else monthly_investment * n
     fv_total = fv_lumpsum + fv_sip
