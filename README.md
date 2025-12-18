@@ -1,4 +1,4 @@
-# SIPY — AI-Driven Investment Planning & Optimization Engine
+# SIPY - AI-Driven Investment Planning & Optimization Engine
 
 SIPY is a hybrid AI system designed to convert unstructured user inputs into structured, personalized investment recommendations with clear, layman-friendly explanations.
 
